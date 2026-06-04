@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.venv/
+.env
+*.egg-info/
+dist/
+build/
+
+# local caches / data (filing store, prices, sqlite) — never commit
+/data/*
+!/data/.gitkeep
+
+# experiment outputs
+/experiments/
+*.sqlite
+*.duckdb

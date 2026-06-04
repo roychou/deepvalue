@@ -1,0 +1,1 @@
+"""L0 ingest — filing -> canonical sections. GREENFIELD: parley only segments MD&A+RiskFactors; extend to full 10-K Items + footnote-type classification (heuristics first, Haiku fallback on ambiguous boundaries)."""

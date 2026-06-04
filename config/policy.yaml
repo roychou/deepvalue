@@ -1,0 +1,17 @@
+# L6 verdict + sizing policy (spec §10). Deterministic. Encodes the Burry-over-Graham posture.
+# The SAME pipeline serves Graham mode with different values here.
+
+posture: burry_conviction
+max_positions: 15            # concentrated, not a basket
+min_conviction_to_buy: 0.72
+min_margin_of_safety: 0.40   # require ~40% discount to conservative asset value
+sizing: fractional_kelly
+kelly_fraction: 0.25         # capped; never full Kelly
+max_position_weight: 0.12    # hard cap per name
+cash_ok: true                # holding cash when nothing qualifies is a valid state
+illiquidity_aware: true      # scale size down by ADV — this is where the edge lives
+liquidity_floor_adv_usd: 50000
+exclude_sectors: [banks, insurers, blank_check]
+
+# The system emits a recommendation artifact (TargetBook) for a human. It takes no trading action.
+human_signoff_required: true   # spec §16 — every BUY requires human sign-off

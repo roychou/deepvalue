@@ -1,0 +1,1 @@
+"""L3 (PRIMARY EDGE) — deterministic sentence alignment across this-Q / prior-Q / YoY. PORT difflib core from parley filing_sentiment._changed_text; ADD embedding-similarity moved-text detection + 3-way alignment + sentence-id citations."""

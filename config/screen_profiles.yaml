@@ -1,0 +1,32 @@
+# L1 quant-gate screen profiles (spec §5). Deterministic; no LLM.
+# Each profile defines value metrics + thresholds for cheap universe reduction.
+
+net_net:
+  description: Classic Graham net-net — price <= 2/3 NCAV, asset-backed.
+  metrics:
+    ncav: current_assets - total_liabilities        # net current asset value
+    nnwc: current_assets - total_liabilities         # (refine: discount receivables/inventory)
+    p_tbv: price_to_tangible_book
+  thresholds:
+    price_to_ncav_max: 0.67
+    p_tbv_max: 1.0
+
+normalized_earnings:
+  description: Cheap on through-cycle EV/EBIT or EV/FCF with a temporary, identifiable problem.
+  metrics:
+    ev_ebit: enterprise_value / normalized_ebit
+    ev_fcf: enterprise_value / normalized_fcf
+  thresholds:
+    ev_ebit_max: 8.0
+
+hidden_assets:
+  description: Sum-of-parts / non-operating assets (real estate, securities, NOLs) > market cap.
+  metrics:
+    nonop_asset_coverage: nonoperating_asset_value / market_cap
+  thresholds:
+    nonop_asset_coverage_min: 1.0
+
+# Applied across all profiles before a ticker is screenable:
+exclusions:
+  exclude_sic_sectors: [banks, insurers, blank_check]   # negative-WC businesses that aren't distressed
+  min_data_completeness: 0.8                              # require enough XBRL tags

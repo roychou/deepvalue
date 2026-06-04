@@ -1,0 +1,18 @@
+# Model assignment per node (spec §13.4). Parameterized so model tiers swap without code changes.
+# Use TRAINING-DATA cutoffs (conservative contamination boundary) when picking models for the
+# point-in-time backtest — see eval/backtest.py and parley's temporal guard.
+
+nodes:
+  triage:            claude-haiku-4-5-20251001     # L2 cheap gate
+  diff_materiality:  claude-sonnet-4-6             # L3 materiality on changed spans
+  forensic:          claude-opus-4-8               # L4 footnote / asset / capital-structure
+  adversarial:       claude-opus-4-8               # L5 bull / skeptic / judge
+
+# Backtest / ladder note: for a contamination-free L3 anomaly test, run the materiality model
+# over dates AFTER its training cutoff (or accept that L3 materiality is a near-deterministic
+# classification of *changed text*, which leaks far less than opinion — see spec §13/parley work).
+training_cutoffs:   # verified platform.claude.com 2026-06-04; RE-VERIFY before relying on these
+  claude-haiku-4-5-20251001: "2025-07-31"
+  claude-sonnet-4-6: "2026-01-31"
+  claude-sonnet-4-5-20250929: "2025-07-31"
+  claude-opus-4-8: "2026-01-31"
