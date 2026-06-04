@@ -28,7 +28,7 @@ import logging
 import os
 from typing import Any
 
-import requests
+import httpx
 
 logger = logging.getLogger(__name__)
 
@@ -53,8 +53,8 @@ def _get(path: str, params: dict[str, Any] | None = None) -> Any:
     params["apikey"] = _api_key()
     url = f"{BASE_URL}/{path.lstrip('/')}"
     try:
-        response = requests.get(url, params=params, timeout=TIMEOUT_SECONDS)
-    except requests.RequestException as e:
+        response = httpx.get(url, params=params, timeout=TIMEOUT_SECONDS)
+    except httpx.RequestError as e:
         raise FMPError(f"FMP request failed: {e}") from e
 
     if response.status_code != 200:
@@ -94,8 +94,8 @@ def get_bulk_csv(path: str, params: dict[str, Any] | None = None) -> str:
     params["apikey"] = _api_key()
     url = f"{BASE_URL}/{path.lstrip('/')}"
     try:
-        response = requests.get(url, params=params, timeout=TIMEOUT_SECONDS)
-    except requests.RequestException as e:
+        response = httpx.get(url, params=params, timeout=TIMEOUT_SECONDS)
+    except httpx.RequestError as e:
         raise FMPError(f"FMP bulk request failed: {e}") from e
     if response.status_code != 200:
         raise FMPError(
