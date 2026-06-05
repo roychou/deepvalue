@@ -62,7 +62,21 @@ def _price_series(key: str) -> dict[str, dict]:
     return {r["date"]: {"close": r.get("close")} for r in rows if r.get("date")}
 
 
-def _name_records(entry: dict, section: str, horizons: list[int]) -> list[dict]:
+def _trailing_return(prices: dict[str, dict], as_of: str, days: int) -> float | None:
+    """Close-to-close return over the `days` trading days ENDING at/just before as_of —
+    the momentum control (was this name already winning before the filing?)."""
+    dates = sorted(prices)
+    idx = next((i for i in range(len(dates) - 1, -1, -1) if dates[i] <= as_of), None)
+    if idx is None or idx - days < 0:
+        return None
+    p1 = prices[dates[idx]].get("close")
+    p0 = prices[dates[idx - days]].get("close")
+    if not p0 or not p1 or p0 <= 0:
+        return None
+    return p1 / p0 - 1.0
+
+
+def _name_records(entry: dict, section: str, horizons: list[int], mask_nums: bool) -> list[dict]:
     """All consecutive-10-K change records for one company (survivorship-correct, by CIK)."""
     cik = entry.get("cik")
     if not cik:
@@ -89,11 +103,12 @@ def _name_records(entry: dict, section: str, horizons: list[int]) -> list[dict]:
     for (d_new, cur), (d_old, pri) in zip(texts, texts[1:]):  # consecutive (new, older)
         if not cur or not pri:
             continue
-        chg = section_change(cur, pri)
+        chg = section_change(cur, pri, mask_nums=mask_nums)
         if chg is None:
             continue
         rec = {"ticker": entry["symbol"], "as_of": d_new, "cohort": d_new[:4],
-               "similarity": chg["similarity"], "changed_frac": chg["changed_frac"]}
+               "similarity": chg["similarity"], "changed_frac": chg["changed_frac"],
+               "prior252": _trailing_return(prices, d_new, 252)}
         for h in horizons:
             rec[f"fwd{h}"] = forward_return(prices, d_new, h)
         out.append(rec)
@@ -129,6 +144,8 @@ def main() -> None:
     ap.add_argument("--section", choices=["mdna", "risk_factors"], default="mdna")
     ap.add_argument("--horizons", default="63,126,252", help="forward trading-day windows")
     ap.add_argument("--min-cohort", type=int, default=5, help="min names/cohort for an IC date")
+    ap.add_argument("--mask-numbers", action="store_true",
+                    help="mask figures before diffing -> isolate PROSE change from table churn")
     args = ap.parse_args()
     horizons = [int(x) for x in args.horizons.split(",")]
 
@@ -140,7 +157,7 @@ def main() -> None:
 
     records, n_with_data = [], 0
     for i, entry in enumerate(sample, 1):
-        recs = _name_records(entry, args.section, horizons)
+        recs = _name_records(entry, args.section, horizons, args.mask_numbers)
         if recs:
             n_with_data += 1
             records.extend(recs)
@@ -157,7 +174,8 @@ def main() -> None:
     # changed_frac is the inverse signal; one line as a sanity mirror
     _ic_by_cohort(records, "changed_frac", horizons[-1], args.min_cohort)
 
-    out = CACHE / f"l3_backtest_{args.section}.json"
+    tag = "_masked" if args.mask_numbers else ""
+    out = CACHE / f"l3_backtest_{args.section}{tag}.json"
     out.write_text(json.dumps(records, indent=2))
     print(f"records -> {out}")
 

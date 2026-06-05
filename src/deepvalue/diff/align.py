@@ -46,7 +46,17 @@ def changed_text(current_text: str, prior_text: str | None) -> str:
     return " ".join(changed_sentences(current_text, prior_text))[:_MAX_DIFF_CHARS]
 
 
-def section_change(current_text: str, prior_text: str) -> dict | None:
+# Numbers / currency / percentages → one placeholder, so a sentence whose only YoY
+# change was its figures reads as UNCHANGED. Isolates linguistic change from financial-
+# table number-churn (the §7 confound: is the signal language, or fundamental volatility?).
+_NUM_RE = re.compile(r"\$?\(?\d[\d,\.]*\)?%?")
+
+
+def mask_numbers(text: str) -> str:
+    return _NUM_RE.sub("#", text)
+
+
+def section_change(current_text: str, prior_text: str, mask_nums: bool = False) -> dict | None:
     """Deterministic YoY change magnitude for one section — the L3 'Lazy Prices' signal,
     no LLM. Returns None if either side is empty (no comparable pair).
 
@@ -54,7 +64,12 @@ def section_change(current_text: str, prior_text: str) -> dict | None:
       Malloy-Nguyen anomaly: LOW similarity (lots of quiet YoY rewriting) predicts LOWER
       forward returns, so `similarity` should rank POSITIVELY with forward return.
     - changed_frac: share of current sentences that are inserted/replaced vs prior.
+
+    mask_nums=True replaces numbers with a placeholder first, so the signal reflects
+    PROSE change only (not financial-table churn).
     """
+    if mask_nums:
+        current_text, prior_text = mask_numbers(current_text), mask_numbers(prior_text)
     cur = split_sentences(current_text)
     pri = split_sentences(prior_text)
     if not cur or not pri:
