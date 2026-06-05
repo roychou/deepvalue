@@ -28,6 +28,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 import re
 import time
 from collections import Counter
@@ -101,9 +102,11 @@ async def fetch(
     path: str,
     params: dict,
     *,
-    retries: int = 4,
+    retries: int = 7,
 ):
-    """One throttled GET with retry/backoff. Returns parsed JSON or None on hard fail."""
+    """One throttled GET with retry/backoff. Returns parsed JSON or None on hard fail.
+    Transient FMP 5xx/429/timeouts on heavy price payloads were the cause of false
+    'absent' rows in the bulk runs, so retry generously (capped backoff + jitter)."""
     params = {**params, "apikey": _key()}
     url = f"{BASE_URL}/{path}"
     for attempt in range(retries):
@@ -113,13 +116,13 @@ async def fetch(
         async with sem:
             budget.n += 1
             try:
-                r = await client.get(url, params=params, timeout=30.0)
+                r = await client.get(url, params=params, timeout=60.0)
             except httpx.RequestError as e:
                 log.warning("net error %s (%s) try %d", path, e, attempt)
-                await asyncio.sleep(2 ** attempt)
+                await asyncio.sleep(min(2 ** attempt, 20) + random.random())
                 continue
         if r.status_code == 429 or r.status_code >= 500:
-            await asyncio.sleep(2 ** attempt)
+            await asyncio.sleep(min(2 ** attempt, 20) + random.random())
             continue
         if r.status_code != 200:
             log.warning("%s -> %d %s", path, r.status_code, r.text[:120])
@@ -219,6 +222,15 @@ async def grab_name(client, gate, budget, sem, entry: dict, want_fund: bool,
                     from_floor: str, reused: bool) -> dict:
     sym, status = entry["symbol"], entry["status"]
     key = cache_key(entry)
+    price_path = DIR_PRICES / f"{key}.json"
+
+    # Resumability FIRST — before spending any call. A cached name costs 0 calls, so a
+    # re-run only retries the absent tail (e.g. names that timed out on large payloads).
+    if price_path.exists():
+        return {"key": key, "symbol": sym, "status": status, "coverage": "cached",
+                "reused": reused, "delistedDate": entry["delistedDate"],
+                "clipped": False, "n_price": 0, "price_first": None,
+                "price_last": None, "n_income": 0, "n_balance": 0}
 
     # CIK/CUSIP via profile -> EDGAR join metadata (NOT the disk key; for a reused
     # delisted ticker this is the *current* holder's CIK, hence cik_uncertain).
@@ -233,11 +245,6 @@ async def grab_name(client, gate, budget, sem, entry: dict, want_fund: bool,
            "from_floor": from_floor, "coverage": "absent", "clipped": False,
            "n_price": 0, "price_first": None, "price_last": None,
            "n_income": 0, "n_balance": 0}
-
-    price_path = DIR_PRICES / f"{key}.json"
-    if price_path.exists():                       # resumable: trust existing file
-        rec["coverage"] = "cached"
-        return rec
 
     # Two-sided clip isolates one company's life from a reused ticker's shared series:
     #  - back clip: delisted names end at delistedDate.
@@ -284,7 +291,7 @@ async def run(args) -> None:
 
     async with httpx.AsyncClient() as client:
         roster_path = DIR_UNIVERSE / "roster.json"
-        if args.phase in ("universe", "all") or not roster_path.exists():
+        if (args.phase in ("universe", "all") and not args.only_absent) or not roster_path.exists():
             roster = await build_universe(client, gate, budget, sem)
         else:
             roster = json.loads(roster_path.read_text())
@@ -292,46 +299,49 @@ async def run(args) -> None:
         if args.phase == "universe":
             return
 
+        # A symbol in >1 roster row is *usually NOT* ticker reuse — it's the same company
+        # appearing as both delisted (correct, with a delistedDate) and stale-"active"
+        # (the screener keeps acquired names flagged isActivelyTrading). True reuse, where
+        # a live company takes a dead ticker, almost never shows here because FMP DROPS the
+        # old company from delisted-companies once the ticker is reused (see SBNY/HMNY).
+        # So we DON'T front-clip the active series: doing so truncated ~1,600 same-company
+        # duplicates to after their own delisting -> empty. The company's full series is
+        # already captured (survivorship-clean) under its delisted key. Flag reuse, never clip.
+        sym_counts = Counter(e["symbol"] for e in roster)
+
+        work, out_manifest = roster, MANIFEST
         if args.limit:
-            # smoke test: mix active + delisted + a known reused ticker if present
             delisted = [r for r in roster if r["status"] == "delisted"]
             active = [r for r in roster if r["status"] == "active"]
-            reused = [r for r in roster if r["symbol"] in ("HMNY", "SBNY")]
+            probe = [r for r in roster if r["symbol"] in ("HMNY", "SBNY")]
             half = max(1, args.limit // 2)
-            roster = (reused + delisted[:half] + active[:args.limit - half])[: args.limit]
-            log.info("SMOKE TEST: %d names (%d reused-ticker probes included)",
-                     len(roster), len(reused))
-
-        # Ticker-reuse map: a symbol appearing in >1 roster row is reused. For an
-        # active name on a reused ticker, front-clip its series to the day after the
-        # prior incarnation's latest delisting so the dead co's bars don't bleed in.
-        sym_counts = Counter(e["symbol"] for e in roster)
-        prior_delist: dict[str, str] = {}
-        for e in roster:
-            if e["status"] == "delisted" and e["delistedDate"]:
-                cur = prior_delist.get(e["symbol"])
-                if cur is None or e["delistedDate"] > cur:
-                    prior_delist[e["symbol"]] = e["delistedDate"]
+            work = (probe + delisted[:half] + active[:args.limit - half])[: args.limit]
+            out_manifest = CACHE / "manifest_smoke.json"   # never clobber the real manifest
+            log.info("SMOKE TEST: %d names (%d reused-ticker probes)", len(work), len(probe))
+        elif args.only_absent:
+            # Retry just the prior run's absent tail; write a side manifest so the
+            # authoritative manifest.json is never clobbered with a partial set.
+            prev = json.loads(MANIFEST.read_text()) if MANIFEST.exists() else []
+            absent = {(m["symbol"], m["status"]) for m in prev if m["coverage"] == "absent"}
+            work = [e for e in roster if (e["symbol"], e["status"]) in absent]
+            out_manifest = CACHE / "manifest_backfill.json"
+            log.info("ONLY-ABSENT: retrying %d absent names", len(work))
 
         want_fund = not args.skip_fundamentals
         manifest, done = [], 0
-        for entry in roster:
+        for entry in work:
             if budget.exhausted():
                 log.warning("call budget %d exhausted — stopping early", args.max_calls)
                 break
             reused = sym_counts[entry["symbol"]] > 1
-            floor = FROM_FLOOR
-            if entry["status"] == "active" and entry["symbol"] in prior_delist:
-                floor = (date.fromisoformat(prior_delist[entry["symbol"]])
-                         + timedelta(days=1)).isoformat()
             manifest.append(
-                await grab_name(client, gate, budget, sem, entry, want_fund, floor, reused))
+                await grab_name(client, gate, budget, sem, entry, want_fund, FROM_FLOOR, reused))
             done += 1
             if done % 200 == 0:
-                log.info("progress %d/%d  calls=%d", done, len(roster), budget.n)
-                MANIFEST.write_text(json.dumps(manifest, indent=2))
+                log.info("progress %d/%d  calls=%d", done, len(work), budget.n)
+                out_manifest.write_text(json.dumps(manifest, indent=2))
 
-    MANIFEST.write_text(json.dumps(manifest, indent=2))
+    out_manifest.write_text(json.dumps(manifest, indent=2))
     present = sum(1 for m in manifest if m["coverage"] == "present")
     cached = sum(1 for m in manifest if m["coverage"] == "cached")
     absent = sum(1 for m in manifest if m["coverage"] == "absent")
@@ -348,6 +358,8 @@ def main() -> None:
     ap.add_argument("--rate", type=int, default=700, help="calls/min ceiling (<750)")
     ap.add_argument("--concurrency", type=int, default=16)
     ap.add_argument("--skip-fundamentals", action="store_true")
+    ap.add_argument("--only-absent", action="store_true",
+                    help="retry just the prior run's absent names (-> manifest_backfill.json)")
     ap.add_argument("--phase", choices=["all", "universe"], default="all")
     asyncio.run(run(ap.parse_args()))
 
