@@ -52,8 +52,8 @@ Each module docstring marks its status. Already ported and working (IC tests pas
 - `diff/align.py` — deterministic sentence-diff core (needs the §7 extensions: sentence IDs,
   3-way alignment, embedding moved-text detection).
 - `ingest/fmp_client.py` + `scripts/fmp_survivorship_probe.py` — FMP client + survivorship probe.
-- `ingest/prices.py` — **STUB (PORT-ADAPT)**: parley used an IBKR price cache; deepvalue sources
-  prices from FMP. Wire `get_prices()` to the FMP grab during Phase 1.
+- `ingest/prices.py` — **PORTED (done)**: `get_prices(ticker)` reads the FMP grab cache
+  (`data/cache/prices/`), unioning a ticker's active + delisted keys into `{date: {close,...}}`.
 Greenfield (not started): full segmentation (`ingest/segmentation.py`), trap signals
 (`quant/trap_signals.py`), all `agents/subagents/*`, calibration (`calibration/*`).
 
