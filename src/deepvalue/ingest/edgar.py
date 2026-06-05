@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from datetime import date, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
@@ -78,7 +79,22 @@ def _user_agent() -> str:
     return ua
 
 
+_SEC_MIN_INTERVAL = 0.11   # SEC fair-access cap is ~10 req/s; gate live calls only
+_sec_last_call = 0.0
+
+
+def _sec_throttle() -> None:
+    """Block briefly so successive SEC network calls stay under the rate cap. Applied
+    only inside the network helpers, so cached reads (the common case) pay nothing."""
+    global _sec_last_call
+    wait = _sec_last_call + _SEC_MIN_INTERVAL - time.monotonic()
+    if wait > 0:
+        time.sleep(wait)
+    _sec_last_call = time.monotonic()
+
+
 def _get(url: str) -> Any:
+    _sec_throttle()
     try:
         resp = httpx.get(url, headers={"User-Agent": _user_agent()}, timeout=TIMEOUT_SECONDS)
     except httpx.RequestError as e:
@@ -269,6 +285,7 @@ def recent_filing_dates(ticker: str, forms: tuple[str, ...] = ("10-Q", "10-K")) 
 
 def _get_text(url: str) -> str:
     """GET a URL and return raw text (filing documents are HTML, not JSON)."""
+    _sec_throttle()
     try:
         resp = httpx.get(url, headers={"User-Agent": _user_agent()}, timeout=TIMEOUT_SECONDS)
     except httpx.RequestError as e:

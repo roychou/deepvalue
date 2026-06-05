@@ -22,7 +22,6 @@ import argparse
 import json
 import logging
 import random
-import time
 from collections import defaultdict
 from pathlib import Path
 
@@ -53,17 +52,6 @@ CACHE = ROOT / "data" / "cache"
 MANIFEST = CACHE / "manifest.json"
 DIR_PRICES = CACHE / "prices"
 
-_SEC_MIN_INTERVAL = 0.11   # stay under SEC's ~10 req/s fair-access cap
-_last_call = 0.0
-
-
-def _throttle() -> None:
-    global _last_call
-    wait = _last_call + _SEC_MIN_INTERVAL - time.monotonic()
-    if wait > 0:
-        time.sleep(wait)
-    _last_call = time.monotonic()
-
 
 def _price_series(key: str) -> dict[str, dict]:
     """{date: {'close': float}} for one cache key, or {} if absent."""
@@ -79,7 +67,6 @@ def _name_records(entry: dict, section: str, horizons: list[int]) -> list[dict]:
     cik = entry.get("cik")
     if not cik:
         return []
-    _throttle()
     filings = filings_by_cik(cik, forms=("10-K",))
     if len(filings) < 2:
         return []
@@ -90,7 +77,6 @@ def _name_records(entry: dict, section: str, horizons: list[int]) -> list[dict]:
     # newest-first; extract each filing's section text once
     texts: list[tuple[str, str | None]] = []
     for fil in filings:
-        _throttle()
         try:
             html = fetch_filing_document_by_cik(cik, fil["accession"], fil["primary_document"])
         except Exception as e:  # one bad doc shouldn't kill the name
