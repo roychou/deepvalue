@@ -37,19 +37,22 @@ def _div(a, b):
     return None if (a is None or b is None or b == 0) else a / b
 
 
-def approx_cfo(p: Period, prior: Period | None) -> float | None:
-    """Operating cash flow ≈ net income + D&A − Δ(non-cash working capital). Coarse, but
-    enough for sign/accruals checks when no cash-flow statement was grabbed."""
+def operating_cfo(p: Period, prior: Period | None) -> tuple[float | None, bool]:
+    """Operating cash flow. Prefers the REAL cash-flow statement line (post re-grab);
+    falls back to NI + D&A − Δ(non-cash working capital). Returns (cfo, approx?)."""
+    real = _f(p.get("operatingCashFlow")) or _f(p.get("netCashProvidedByOperatingActivities"))
+    if real is not None:
+        return real, False
     ni = _f(p.get("netIncome"))
     da = _f(p.get("depreciationAndAmortization")) or 0.0
     if ni is None:
-        return None
+        return None, True
     if prior is None:
-        return ni + da
+        return ni + da, True
     d_rec = (_f(p.get("netReceivables")) or 0.0) - (_g(prior, "netReceivables") or 0.0)
     d_inv = (_f(p.get("inventory")) or 0.0) - (_g(prior, "inventory") or 0.0)
     d_ap = (_f(p.get("accountPayables")) or 0.0) - (_g(prior, "accountPayables") or 0.0)
-    return ni + da - d_rec - d_inv + d_ap
+    return ni + da - d_rec - d_inv + d_ap, True
 
 
 def altman_z(p: Period, price: float) -> dict:
@@ -79,7 +82,7 @@ def piotroski_f(p: Period, prior: Period | None) -> dict:
     (then those points are skipped). CFO is approximated (cfo_approx flagged)."""
     ta = _f(p.get("totalAssets"))
     ni = _f(p.get("netIncome"))
-    cfo = approx_cfo(p, prior)
+    cfo, cfo_approx = operating_cfo(p, prior)
     pts, checks = 0, 0
 
     def pt(cond):
@@ -109,7 +112,7 @@ def piotroski_f(p: Period, prior: Period | None) -> dict:
         pt(None if (gm is None or gm0 is None) else gm > gm0)               # Δmargin > 0
         at = _div(_f(p.get("revenue")), ta); at0 = _div(_g(prior, "revenue"), ta0)
         pt(None if (at is None or at0 is None) else at > at0)               # Δasset turnover > 0
-    return {"f_score": pts, "f_checks": checks, "cfo_approx": True}
+    return {"f_score": pts, "f_checks": checks, "cfo_approx": cfo_approx}
 
 
 def beneish_m(p: Period, prior: Period | None) -> dict:
@@ -139,7 +142,7 @@ def beneish_m(p: Period, prior: Period | None) -> dict:
     depi = r(r(dep0, (dep0 or 0) + (ppe0 or 0)), r(dep, (dep or 0) + (ppe or 0)))
     sgai = r(r(sga, s), r(sga0, s0))
     lvgi = r(r((ltd or 0) + (cl or 0), ta), r((ltd0 or 0) + (cl0 or 0), ta0))
-    cfo = approx_cfo(p, prior)
+    cfo, cfo_approx = operating_cfo(p, prior)
     ni = _f(p.get("netIncome"))
     tata = r((ni - cfo) if (ni is not None and cfo is not None) else None, ta)
     parts = {"DSRI": dsri, "GMI": gmi, "AQI": aqi, "SGI": sgi, "DEPI": depi,
@@ -147,7 +150,7 @@ def beneish_m(p: Period, prior: Period | None) -> dict:
     d = {k: (v if v is not None else (0.0 if k == "TATA" else 1.0)) for k, v in parts.items()}
     m = (-4.84 + 0.92 * d["DSRI"] + 0.528 * d["GMI"] + 0.404 * d["AQI"] + 0.892 * d["SGI"]
          + 0.115 * d["DEPI"] - 0.172 * d["SGAI"] + 4.679 * d["TATA"] - 0.327 * d["LVGI"])
-    return {"m_score": round(m, 3), "m_flag": m > -1.78, "cfo_approx": True}
+    return {"m_score": round(m, 3), "m_flag": m > -1.78, "cfo_approx": cfo_approx}
 
 
 def _one_minus(x):
@@ -155,13 +158,14 @@ def _one_minus(x):
 
 
 def cash_runway_months(p: Period) -> float | None:
-    """Cash / annual cash burn × 12. None if profitable (no burn) or no data. Annual grab
-    → net income is the burn proxy (no quarterly cadence)."""
+    """Cash / annual cash burn × 12. Burn = negative operating cash flow (real if grabbed,
+    else net income). None if cash-generative or no data."""
     cash = _f(p.get("cashAndShortTermInvestments")) or _f(p.get("cashAndCashEquivalents"))
-    ni = _f(p.get("netIncome"))
-    if cash is None or ni is None or ni >= 0:
+    burn = (_f(p.get("operatingCashFlow"))
+            or _f(p.get("netCashProvidedByOperatingActivities")) or _f(p.get("netIncome")))
+    if cash is None or burn is None or burn >= 0:
         return None
-    return round(cash / (-ni) * 12.0, 1)
+    return round(cash / (-burn) * 12.0, 1)
 
 
 def dilution_yoy(p: Period, prior: Period | None) -> float | None:

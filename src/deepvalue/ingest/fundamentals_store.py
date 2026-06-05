@@ -22,18 +22,22 @@ FUND_DIR = Path("data/cache/fundamentals")
 
 @dataclass(frozen=True)
 class Period:
-    """One fiscal period's merged income + balance statement, with its filing date."""
+    """One fiscal period's merged income + balance + cash-flow statement, with filing date."""
     symbol: str
     cik: str | None
     period_end: str          # period_of_report — for labeling ONLY, never for as-of cuts
     filing_date: str         # the point-in-time key
     income: dict
     balance: dict
+    cashflow: dict
 
     def get(self, field: str, default=None):
-        """Read a line item from income or balance (income wins on the rare overlap)."""
-        v = self.income.get(field, self.balance.get(field, default))
-        return v if v is not None else default
+        """Read a line item from income, then balance, then cash-flow (first hit wins)."""
+        for stmt in (self.income, self.balance, self.cashflow):
+            v = stmt.get(field)
+            if v is not None:
+                return v
+        return default
 
 
 def _safe(symbol: str) -> str:
@@ -57,6 +61,7 @@ def load_periods(symbol: str, cache_dir: Path | None = None) -> list[Period]:
         return []
     data = json.loads(path.read_text())
     bal_by_date = {r.get("date"): r for r in data.get("balance", []) if r.get("date")}
+    cf_by_date = {r.get("date"): r for r in data.get("cashflow", []) if r.get("date")}
     periods = []
     for inc in data.get("income", []):
         d = inc.get("date")
@@ -65,7 +70,7 @@ def load_periods(symbol: str, cache_dir: Path | None = None) -> list[Period]:
             continue
         periods.append(Period(
             symbol=symbol, cik=data.get("cik"), period_end=d, filing_date=filed[:10],
-            income=inc, balance=bal_by_date.get(d, {}),
+            income=inc, balance=bal_by_date.get(d, {}), cashflow=cf_by_date.get(d, {}),
         ))
     periods.sort(key=lambda p: p.period_end, reverse=True)
     return periods

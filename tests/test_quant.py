@@ -2,11 +2,28 @@ import json
 
 from deepvalue.ingest.fundamentals_store import Period, as_of, load_periods
 from deepvalue.quant.metrics import ncav, nnwc, tangible_book, value_metrics
-from deepvalue.quant.trap_signals import altman_z, beneish_m, dilution_yoy, piotroski_f
+from deepvalue.quant.trap_signals import (
+    altman_z,
+    beneish_m,
+    dilution_yoy,
+    operating_cfo,
+    piotroski_f,
+)
 
 
-def _period(income=None, balance=None, period_end="2020-12-31", filed="2021-03-01"):
-    return Period("T", "1", period_end, filed, income or {}, balance or {})
+def test_operating_cfo_prefers_real():
+    # real cash-flow line wins over the NI+D&A approximation
+    p = _period(income={"netIncome": 10, "depreciationAndAmortization": 5},
+                cashflow={"operatingCashFlow": 99})
+    assert operating_cfo(p, None) == (99, False)
+    # no cash-flow statement -> approximation, flagged
+    cfo, approx = operating_cfo(_period(income={"netIncome": 10,
+                                "depreciationAndAmortization": 5}), None)
+    assert cfo == 15 and approx is True
+
+
+def _period(income=None, balance=None, cashflow=None, period_end="2020-12-31", filed="2021-03-01"):
+    return Period("T", "1", period_end, filed, income or {}, balance or {}, cashflow or {})
 
 
 # ----- value metrics -----
