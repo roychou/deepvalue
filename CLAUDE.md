@@ -52,18 +52,21 @@ Each module docstring marks its status. Already ported and working (IC tests pas
 - `diff/align.py` — deterministic sentence-diff core (needs the §7 extensions: sentence IDs,
   3-way alignment, embedding moved-text detection).
 - `ingest/fmp_client.py` + `scripts/fmp_survivorship_probe.py` — FMP client + survivorship probe.
-- `ingest/prices.py` — **STUB (PORT-ADAPT)**: parley used an IBKR price cache; deepvalue sources
-  prices from FMP. Wire `get_prices()` to the FMP grab during Phase 1.
+- `ingest/prices.py` — **PORTED (done)**: `get_prices(ticker)` reads the FMP grab cache
+  (`data/cache/prices/`), unioning a ticker's active + delisted keys into `{date: {close,...}}`.
 Greenfield (not started): full segmentation (`ingest/segmentation.py`), trap signals
 (`quant/trap_signals.py`), all `agents/subagents/*`, calibration (`calibration/*`).
 
 ## Data
 - **EDGAR** (free): filing text + post-2009 XBRL fundamentals. Set `SEC_USER_AGENT`; ~10 req/s cap.
 - **FMP** (paid sub — **expires ~end June 2026**): survivorship-free universe + delisted prices +
-  pre-2009 fundamentals. The probe (4 Jun) PASSED at large-cap level (delisted history ends at
-  delisting date). OPEN: micro-cap delisted coverage unconfirmed; SBNY showed **ticker-reuse**
-  (key by CIK/CUSIP, clip at delisting); `delisted-companies` is paginated (100/page).
-  **Perishable: do the bulk grab before the sub lapses.** Keys in `.env` (gitignored).
+  pre-2009 fundamentals. **GRAB DONE (5 Jun 2026)** — `scripts/fmp_grab.py` pulled ~17.5k US names
+  (active+delisted, listed+OTC) to `data/cache/` (gitignored: `prices/`, `fundamentals/`,
+  `manifest.json`). **99.0% per-symbol coverage**, 0 point-in-time violations; the ~1% gap is
+  non-common-equity (units/preferreds/warrants) the screen excludes. Keyed by `symbol+status+
+  delistedDate` (NOT CIK — collides on dual-class), series clipped at `delistedDate`. Rebuild the
+  manifest from disk anytime: `uv run python scripts/fmp_build_manifest.py`. **NEXT: port
+  `ingest/prices.py` to read this cache** (still a stub). Keys in `.env` (gitignored).
 
 ## Build order — validate the edge before building the machine (spec §15)
 1. **Phase 1 — L0 (ingest+segmentation) + L3 (diff anomaly backtest). START HERE.** Statistically
@@ -72,8 +75,8 @@ Greenfield (not started): full segmentation (`ingest/segmentation.py`), trap sig
 2. L1 quant gate + trap signals → 3. L2 triage+cache → 4. L4 specialists → 5. L5 trap filter →
    6. L6 sizing + L7 calibration.
 
-The immediate gate before Phase 1 spend: the **FMP survivorship grab** (perishable) to lock the
-universe, then port `ingest/prices.py` to FMP.
+The immediate gate before Phase 1 spend: the FMP survivorship grab is **done** (universe locked in
+`data/cache/`); the remaining gate is to **port `ingest/prices.py`** to read that cache.
 
 ## Environment
 Python ≥3.11, `uv`. `uv sync`; run commands with `uv run` (e.g. `uv run pytest`). Cross-repo:
