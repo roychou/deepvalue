@@ -13,9 +13,37 @@ so the cap, not caching, is the real cost lever here.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 
 from deepvalue.models import ROOT
+
+# --- anonymization (contamination probe) -------------------------------------
+# Mask company identifiers so the model can't RECALL which company it's reading
+# (and thus can't leak that company's known outcome). If the deterioration signal
+# survives anonymization it lives in the risk LANGUAGE, not in entity recognition.
+# Imperfect — single-word brands/products can still leak — but it breaks the main
+# recall handle (the company name + named entities) while preserving risk vocabulary
+# (mostly lowercase: "substantial doubt", "covenant", "liquidity").
+_NAME_STOP = {
+    "inc", "corp", "corporation", "co", "company", "ltd", "limited", "llc", "lp",
+    "plc", "holdings", "group", "the", "and", "class", "common", "stock",
+    "international", "industries", "systems", "technologies", "technology",
+    "enterprises", "global", "capital", "partners", "trust",
+}
+_ENTITY_RUN = re.compile(r"\b([A-Z][a-zA-Z&.\-]+(?:\s+[A-Z][a-zA-Z&.\-]+)+)\b")
+
+
+def anonymize_spans(text: str, company_name: str | None, ticker: str) -> str:
+    """Replace the company name (+ ticker) and multi-word proper-noun runs with
+    generic placeholders, leaving risk vocabulary intact."""
+    toks = {t for t in re.findall(r"[A-Za-z]+", company_name or "")
+            if len(t) > 2 and t.lower() not in _NAME_STOP}
+    toks.add(ticker)
+    out = text
+    for tok in sorted(toks, key=len, reverse=True):
+        out = re.sub(rf"\b{re.escape(tok)}\b", "the Company", out, flags=re.IGNORECASE)
+    return _ENTITY_RUN.sub("a named entity", out)
 
 # Typed change categories (spec §7). `removed_reassurance` is the high-value signal —
 # the quiet deletion of a sentence that previously said a customer/covenant was secure.

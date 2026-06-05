@@ -27,7 +27,7 @@ load_dotenv(ROOT / ".env")
 
 import anthropic  # noqa: E402
 from deepvalue.diff.align import changed_text  # noqa: E402
-from deepvalue.diff.materiality import score_materiality  # noqa: E402
+from deepvalue.diff.materiality import anonymize_spans, score_materiality  # noqa: E402
 from deepvalue.eval.ic import ICResult, cross_sectional_ic, ic_summary, spearman  # noqa: E402
 from deepvalue.ingest.edgar import filings_by_cik  # noqa: E402
 from deepvalue.ingest.edgar_filings import (  # noqa: E402
@@ -92,6 +92,8 @@ def main() -> None:
     ap.add_argument("--max-llm-usd", type=float, default=20.0)
     ap.add_argument("--recent-from", default="2015", help="cohort year floor (more names/cohort)")
     ap.add_argument("--min-cohort", type=int, default=5)
+    ap.add_argument("--anonymize", action="store_true",
+                    help="mask company identifiers before scoring (contamination probe)")
     args = ap.parse_args()
 
     records = json.loads(Path(args.records).read_text())
@@ -100,6 +102,11 @@ def main() -> None:
     for m in manifest:                       # first cik seen per symbol
         if m.get("cik") and m["symbol"] not in sym2cik:
             sym2cik[m["symbol"]] = m["cik"]
+    sym2name = {}
+    if args.anonymize:
+        for e in json.loads((CACHE / "universe" / "roster.json").read_text()):
+            sym2name.setdefault(e["symbol"], e.get("companyName"))
+        log.info("ANONYMIZE: masking company identifiers before scoring")
 
     # Require fwd252 present (so every scored pair contributes to ALL horizon ICs — a
     # 252d window implies the 63/126d ones exist). Then INTERLEAVE across cohorts
@@ -122,7 +129,8 @@ def main() -> None:
     client = anthropic.Anthropic()
     tcache: dict[str, list] = {}
     scored, spent = [], 0.0
-    out_path = CACHE / "l3_materiality_pilot.json"
+    out_path = CACHE / ("l3_materiality_pilot_anon.json" if args.anonymize
+                        else "l3_materiality_pilot.json")
 
     for rec in work:
         if len(scored) >= args.max_pairs or spent + PER_CALL_EST > args.max_llm_usd:
@@ -132,6 +140,8 @@ def main() -> None:
         ct = _changed_for_record(sym2cik[rec["ticker"]], rec["as_of"], tcache)
         if not ct:
             continue
+        if args.anonymize:
+            ct = anonymize_spans(ct, sym2name.get(rec["ticker"]), rec["ticker"])
         try:
             m = score_materiality(client, ct)
         except Exception as e:
@@ -153,6 +163,28 @@ def main() -> None:
     print(f"\n=== L3 MATERIALITY PILOT ===  scored={len(scored)} pairs | spent=${spent:.3f} "
           f"| removed_reassurance flagged on {n_rr} ({n_rr/max(1,len(scored))*100:.0f}%)")
     print(f"cohorts={len({r['cohort'] for r in scored})} | records -> {out_path}")
+    def f(s):
+        return (f"{s.mean_ic:+.4f}(t={s.t_stat:+.2f})"
+                if s.mean_ic is not None and s.t_stat is not None else "n/a")
+
+    # contamination probe: compare anonymized IC to the original (un-masked) IC on the
+    # SAME pairs. If anon ≈ original -> the signal is reading; if anon collapses -> recall.
+    orig = {}
+    if args.anonymize and (CACHE / "l3_materiality_pilot.json").exists():
+        for r in json.loads((CACHE / "l3_materiality_pilot.json").read_text()):
+            orig[(r["ticker"], r["as_of"])] = r["deterioration"]
+        joined = [{**r, "orig_det": orig[(r["ticker"], r["as_of"])]}
+                  for r in scored if (r["ticker"], r["as_of"]) in orig]
+        print(f"\nCONTAMINATION PROBE — {len(joined)} pairs scored both un-masked and anonymized:")
+        print(f"{'horizon':>8} | {'-deterioration ORIG':>22} | {'-deterioration ANON':>22} | "
+              f"{'similarity (det.)':>20}")
+        for h in (63, 126, 252):
+            o = _ic(joined, lambda r: -r["orig_det"], h, args.min_cohort)
+            a = _ic(joined, lambda r: -r["deterioration"], h, args.min_cohort)
+            b = _ic(joined, lambda r: r["similarity"], h, args.min_cohort)
+            print(f"{h:>8} | {f(o):>22} | {f(a):>22} | {f(b):>20}")
+        return
+
     print("\nCross-sectional IC on the SAME scored pairs — typed signal vs raw-similarity baseline:")
     print(f"{'horizon':>8} | {'similarity (det.)':>20} | {'-deterioration (LLM)':>22} | "
           f"{'-removed_reassur (LLM)':>24}")
@@ -160,9 +192,6 @@ def main() -> None:
         base = _ic(scored, lambda r: r["similarity"], h, args.min_cohort)
         det = _ic(scored, lambda r: -r["deterioration"], h, args.min_cohort)
         rr = _ic(scored, lambda r: -1.0 if r["removed_reassurance"] else 0.0, h, args.min_cohort)
-        def f(s):
-            return (f"{s.mean_ic:+.4f}(t={s.t_stat:+.2f})"
-                    if s.mean_ic is not None and s.t_stat is not None else "n/a")
         print(f"{h:>8} | {f(base):>20} | {f(det):>22} | {f(rr):>24}")
 
 
