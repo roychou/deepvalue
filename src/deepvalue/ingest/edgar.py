@@ -32,7 +32,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-import requests
+import httpx
 
 from deepvalue.ingest.fundamentals import calc_debt_equity, calc_growth_yoy, calc_margin
 
@@ -80,8 +80,8 @@ def _user_agent() -> str:
 
 def _get(url: str) -> Any:
     try:
-        resp = requests.get(url, headers={"User-Agent": _user_agent()}, timeout=TIMEOUT_SECONDS)
-    except requests.RequestException as e:
+        resp = httpx.get(url, headers={"User-Agent": _user_agent()}, timeout=TIMEOUT_SECONDS)
+    except httpx.RequestError as e:
         raise EdgarError(f"EDGAR request failed: {e}") from e
     if resp.status_code != 200:
         raise EdgarError(f"EDGAR returned {resp.status_code} for {url}: {resp.text[:200]}")
@@ -180,6 +180,55 @@ def _submissions(ticker: str) -> dict:
     return data
 
 
+def _parse_recent_filings(recent: dict, forms: tuple[str, ...]) -> list[dict]:
+    """Shape the SEC `filings.recent` blob into our filing records, newest first."""
+    out = [
+        {
+            "form": form,
+            "filed": filed,
+            "accession": acc.replace("-", ""),
+            "primary_document": doc,
+        }
+        for form, filed, acc, doc in zip(
+            recent.get("form", []),
+            recent.get("filingDate", []),
+            recent.get("accessionNumber", []),
+            recent.get("primaryDocument", []),
+        )
+        if form in forms
+    ]
+    out.sort(key=lambda f: f["filed"], reverse=True)
+    return out
+
+
+def filings_by_cik(cik: str, forms: tuple[str, ...] = ("10-K",)) -> list[dict]:
+    """Filings for a CIK directly — the survivorship-correct path for the L3 backtest.
+
+    Delisted tickers don't resolve in the current SEC ticker map (and reuse would point
+    to the wrong company), but a permanent CIK does — and the price-grab manifest already
+    carries each name's CIK. Keyed by CIK (zero-padded to 10 digits) + today (the recent
+    blob is mutable). Returns [] on any fetch error so one bad name can't abort a sweep.
+    """
+    cik10 = str(cik).zfill(10)
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cache_path = CACHE_DIR / f"CIK{cik10}_submissions_{date.today():%Y%m%d}.json"
+    try:
+        if cache_path.exists():
+            data = json.loads(cache_path.read_text())
+        else:
+            data = _get(f"{SEC_DATA_BASE}/submissions/CIK{cik10}.json")
+            cache_path.write_text(json.dumps(data))
+    except EdgarError as e:
+        logger.warning(f"filings_by_cik({cik10}) failed: {e}")
+        return []
+    return _parse_recent_filings(data.get("filings", {}).get("recent", {}), forms)
+
+
+def filing_doc_url_by_cik(cik: str, accession: str, primary_document: str) -> str:
+    """Archives URL for a filing document, keyed by CIK (no ticker resolution)."""
+    return f"{SEC_WWW_BASE}/Archives/edgar/data/{int(cik)}/{accession}/{primary_document}"
+
+
 def recent_filings(ticker: str, forms: tuple[str, ...] = ("10-Q", "10-K")) -> list[dict]:
     """Structured recent filings, newest first: {form, filed, accession, primary_document}.
 
@@ -221,8 +270,8 @@ def recent_filing_dates(ticker: str, forms: tuple[str, ...] = ("10-Q", "10-K")) 
 def _get_text(url: str) -> str:
     """GET a URL and return raw text (filing documents are HTML, not JSON)."""
     try:
-        resp = requests.get(url, headers={"User-Agent": _user_agent()}, timeout=TIMEOUT_SECONDS)
-    except requests.RequestException as e:
+        resp = httpx.get(url, headers={"User-Agent": _user_agent()}, timeout=TIMEOUT_SECONDS)
+    except httpx.RequestError as e:
         raise EdgarError(f"EDGAR request failed: {e}") from e
     if resp.status_code != 200:
         raise EdgarError(f"EDGAR returned {resp.status_code} for {url}: {resp.text[:200]}")

@@ -40,16 +40,17 @@ def main() -> None:
     for e in roster:
         key = cache_key(e["symbol"], e["status"], e["delistedDate"])
         pf = DIR_PRICES / f"{key}.json"
-        n_price, first, last = 0, None, None
+        n_price, first, last, cik = 0, None, None, None
         if pf.exists():
             data = json.loads(pf.read_text())
+            cik = data.get("cik")        # the EDGAR join key (price grab stored it per file)
             prs = data.get("rows", [])
             if prs:
                 ds = sorted(r["date"] for r in prs if "date" in r)
                 n_price, first, last = len(prs), ds[0], ds[-1]
         sym_has_data[e["symbol"]] |= n_price > 0
         rows.append({
-            "key": key, "symbol": e["symbol"], "status": e["status"],
+            "key": key, "symbol": e["symbol"], "status": e["status"], "cik": cik,
             "exchange": e["exchange"], "delistedDate": e["delistedDate"],
             "reused": sym_counts[e["symbol"]] > 1,
             "n_price": n_price, "price_first": first, "price_last": last,

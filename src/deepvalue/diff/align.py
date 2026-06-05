@@ -44,3 +44,27 @@ def changed_sentences(current_text: str, prior_text: str | None) -> list[str]:
 def changed_text(current_text: str, prior_text: str | None) -> str:
     """`changed_sentences` joined and length-bounded — the span payload for the materiality LLM."""
     return " ".join(changed_sentences(current_text, prior_text))[:_MAX_DIFF_CHARS]
+
+
+def section_change(current_text: str, prior_text: str) -> dict | None:
+    """Deterministic YoY change magnitude for one section — the L3 'Lazy Prices' signal,
+    no LLM. Returns None if either side is empty (no comparable pair).
+
+    - similarity: difflib sentence-sequence ratio in [0,1] (1.0 = identical). The Cohen-
+      Malloy-Nguyen anomaly: LOW similarity (lots of quiet YoY rewriting) predicts LOWER
+      forward returns, so `similarity` should rank POSITIVELY with forward return.
+    - changed_frac: share of current sentences that are inserted/replaced vs prior.
+    """
+    cur = split_sentences(current_text)
+    pri = split_sentences(prior_text)
+    if not cur or not pri:
+        return None
+    matcher = difflib.SequenceMatcher(a=pri, b=cur, autojunk=False)
+    changed = sum(j2 - j1 for tag, _i1, _i2, j1, j2 in matcher.get_opcodes()
+                  if tag in ("insert", "replace"))
+    return {
+        "similarity": matcher.ratio(),
+        "changed_frac": changed / len(cur),
+        "n_cur": len(cur),
+        "n_pri": len(pri),
+    }
