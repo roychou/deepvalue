@@ -58,8 +58,8 @@ def main() -> None:
     n_val = sum(1 for r in records if r.get(args.value) is not None)
     print(f"value={args.value} (cheapest tercile)  x  quality={args.quality}  "
           f"| records with {args.value}: {n_val}")
-    print(f"{'horizon':>8} | {'quality IC in cheap':>22} | {'cheap+HiQ':>10} | "
-          f"{'cheap+LoQ':>10} | {'spread':>9} | {'cohorts':>7}")
+    print(f"{'horizon':>8} | {'quality IC in cheap':>22} | {'HiQ med':>9} | "
+          f"{'LoQ med':>9} | {'spread':>8} | {'cohorts':>7}")
     for h in horizons:
         ics, hi_ret, lo_ret = [], [], []
         for c, rows in by_cohort.items():
@@ -71,8 +71,11 @@ def main() -> None:
                 ics.append(ICResult(c, ic, len(q)))
             qs = sorted(q, key=lambda t: t[0])
             half = len(qs) // 2
-            lo_ret.append(statistics.mean([b for _, b in qs[:half]]))
-            hi_ret.append(statistics.mean([b for _, b in qs[len(qs) - half:]]))
+            # MEDIAN, not mean: penny-stock/delisted forward returns have extreme outliers
+            # (near-zero prices -> absurd ratios) that destroy the mean. IC above is rank-
+            # based and already robust to them; this keeps the magnitude readout sane too.
+            lo_ret.append(statistics.median([b for _, b in qs[:half]]))
+            hi_ret.append(statistics.median([b for _, b in qs[len(qs) - half:]]))
         s = ic_summary(ics, horizon_days=h, spacing_days=252)
         ic_str = (f"{s.mean_ic:+.4f}(t={s.t_stat:+.2f})"
                   if s.mean_ic is not None and s.t_stat is not None else "n/a")
@@ -80,9 +83,9 @@ def main() -> None:
         lo = statistics.mean(lo_ret) if lo_ret else None
         spread = (hi - lo) if (hi is not None and lo is not None) else None
         print(f"{h:>8} | {ic_str:>22} | "
-              f"{(f'{hi*100:+.2f}%' if hi is not None else 'n/a'):>10} | "
-              f"{(f'{lo*100:+.2f}%' if lo is not None else 'n/a'):>10} | "
-              f"{(f'{spread*100:+.2f}%' if spread is not None else 'n/a'):>9} | {len(ics):>7}")
+              f"{(f'{hi*100:+.1f}%' if hi is not None else 'n/a'):>9} | "
+              f"{(f'{lo*100:+.1f}%' if lo is not None else 'n/a'):>9} | "
+              f"{(f'{spread*100:+.1f}%' if spread is not None else 'n/a'):>8} | {len(ics):>7}")
 
 
 if __name__ == "__main__":
