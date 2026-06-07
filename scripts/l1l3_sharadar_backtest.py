@@ -74,20 +74,55 @@ def _cheap_work(per_cohort: int, from_cohort: str, cikmap: dict) -> list[dict]:
     return [r for rnd in zip_longest(*[cheap[c] for c in sorted(cheap, reverse=True)]) for r in rnd if r]
 
 
+_DISTRESS = ["13", "42", "41", "24", "31", "26"]
+
+
+def _attach_distress(scored: list[dict]) -> None:
+    """Flag each scored record with a trailing-12m hard distress event (free, from EVENTS)."""
+    con = duckdb.connect(str(CACHE / "sharadar.duckdb"), read_only=True)
+    like = " OR ".join(f"'|'||eventcodes||'|' LIKE '%|{c}|%'" for c in _DISTRESS)
+    for r in scored:
+        n = con.execute(
+            f"SELECT count(*) FROM events WHERE ticker = ? AND date >= (?::DATE - INTERVAL 365 DAY) "
+            f"AND date <= ?::DATE AND ({like})", [r["ticker"], r["as_of"], r["as_of"]]).fetchone()[0]
+        r["distress"] = 1 if n else 0
+    con.close()
+
+
+def _ic_by_cohort(rows_by_cohort, conv_fn, h, min_cohort):
+    res = []
+    for c, rows in rows_by_cohort.items():
+        pts = [(conv_fn(r), r[f"fwd{h}"]) for r in rows
+               if conv_fn(r) is not None and r.get(f"fwd{h}") is not None]
+        if len(pts) < min_cohort:
+            continue
+        ic = spearman([a for a, _ in pts], [b for _, b in pts])
+        if ic is not None:
+            res.append(ICResult(c, ic, len(pts)))
+    return ic_summary(res, horizon_days=h, spacing_days=252)
+
+
+def _mdna(cik, f, tcache):
+    """Extracted MD&A for one 10-K, cached per accession; only fetches what's needed."""
+    key = f["accession"]
+    if key not in tcache:
+        try:
+            html = fetch_filing_document_by_cik(cik, f["accession"], f["primary_document"])
+            tcache[key] = extract_sections(clean_text(html), "10-K").get("mdna")
+        except Exception:
+            tcache[key] = None
+    return tcache[key]
+
+
 def _changed_near(cik, as_of, tcache):
-    if cik not in tcache:
-        out = []
-        for f in filings_by_cik(cik, forms=("10-K",)):
-            try:
-                html = fetch_filing_document_by_cik(cik, f["accession"], f["primary_document"])
-                out.append((f["filed"], extract_sections(clean_text(html), "10-K").get("mdna")))
-            except Exception:
-                out.append((f["filed"], None))
-        tcache[cik] = out
-    for (d_new, cur), (_d, pri) in zip(tcache[cik], tcache[cik][1:]):
-        if d_new <= as_of and cur and pri:
-            return changed_text(cur, pri) or None
-    return None
+    """Changed MD&A spans for the 10-K filed at/just before as_of vs its prior — fetches
+    ONLY those two documents (not the whole filing history)."""
+    fils = filings_by_cik(cik, forms=("10-K",))   # newest-first; cached submissions
+    idx = next((i for i, f in enumerate(fils) if f["filed"] <= as_of), None)
+    if idx is None or idx + 1 >= len(fils):
+        return None
+    cur, pri = _mdna(cik, fils[idx], tcache), _mdna(cik, fils[idx + 1], tcache)
+    return changed_text(cur, pri) or None if (cur and pri) else None
 
 
 def main() -> None:
@@ -134,6 +169,7 @@ def main() -> None:
             (CACHE / "l1l3_sharadar.json").write_text(json.dumps(scored))
 
     (CACHE / "l1l3_sharadar.json").write_text(json.dumps(scored))
+    _attach_distress(scored)            # free EVENTS trailing-12m flag, for the leading-indicator cut
     print(f"\n=== L1xL3 on SHARADAR ({args.from_cohort}+, survivorship-free) ===")
     print(f"cheap names scored={len(scored)} | LLM spent=${spent:.3f} | "
           f"cohorts={len({r['cohort'] for r in scored})}")
@@ -167,6 +203,27 @@ def main() -> None:
               f"{(f'{lo_m*100:+.1f}%' if lo_m is not None else 'n/a'):>11} | "
               f"{(f'{hi_m*100:+.1f}%' if hi_m is not None else 'n/a'):>11} | "
               f"{(f'{sp*100:+.1f}%' if sp is not None else 'n/a'):>8}")
+    # THE decisive test: does L3 language LEAD the hard 8-K event? i.e. does -deterioration
+    # still predict among names with NO trailing-12m hard distress event?
+    n_flag = sum(r.get("distress", 0) for r in scored)
+    print(f"\n--- LEADING-INDICATOR TEST (scored names w/ trailing hard event: "
+          f"{n_flag}/{len(scored)} = {n_flag/max(1,len(scored))*100:.0f}%) ---")
+    print(f"{'horizon':>8} | {'L3 IC (all cheap)':>20} | {'L3 IC | EVENT-CLEAN':>22} | "
+          f"{'EVENTS -distress IC':>20}")
+    byc_all = defaultdict(list)
+    byc_clean = defaultdict(list)
+    for r in scored:
+        if r.get("deterioration") is not None:
+            byc_all[r["cohort"]].append(r)
+            if not r.get("distress"):
+                byc_clean[r["cohort"]].append(r)
+    f = lambda s: (f"{s.mean_ic:+.4f}(t={s.t_stat:+.1f})" if s.mean_ic is not None and s.t_stat is not None else "n/a")  # noqa: E731
+    for h in (63, 126, 252):
+        allic = _ic_by_cohort(byc_all, lambda r: -r["deterioration"], h, args.min_cohort)
+        clnic = _ic_by_cohort(byc_clean, lambda r: -r["deterioration"], h, args.min_cohort)
+        evic = _ic_by_cohort(byc_all, lambda r: -r.get("distress", 0), h, args.min_cohort)
+        print(f"{h:>8} | {f(allic):>20} | {f(clnic):>22} | {f(evic):>20}")
+    print("(L3 IC|EVENT-CLEAN significant => language LEADS the hard event = the founding bet holds.)")
     print(f"\nrecords -> {CACHE / 'l1l3_sharadar.json'}")
 
 
