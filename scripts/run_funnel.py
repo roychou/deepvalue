@@ -97,8 +97,14 @@ def main() -> None:
             continue
         if is_excluded_sector(company_sic(cik)):     # banks / insurers / blank-check (policy)
             continue
+        ptn = vm.get("price_to_ncav")
+        # margin of safety = discount to the most conservative asset value (NCAV or tangible
+        # book): mos = 1 - price/value = 1 - min(cheapness ratios). >0 means below asset value.
+        ratios = [r for r in (ptbv, ptn) if r is not None and r > 0]
+        mos = (1 - min(ratios)) if ratios else None
         cands.append({"ticker": ticker, "cik": str(cik), "price": price, "adv": adv,
-                      "p_tbv": ptbv, "f_score": f, "dilution": ts.get("dilution_yoy"),
+                      "p_tbv": ptbv, "price_to_ncav": ptn, "margin_of_safety": mos,
+                      "f_score": f, "dilution": ts.get("dilution_yoy"),
                       "ev_ebit": vm.get("ev_ebit"), "z_zone": ts.get("z_zone"),
                       "runway_months": ts.get("runway_months"), "market_cap": vm.get("market_cap")})
 
@@ -114,32 +120,56 @@ def main() -> None:
         c["composite"] = round(comp, 3)
     cands.sort(key=lambda c: c["composite"], reverse=True)
 
-    # 3) verdict (v0, deterministic — a ranked shortlist, NOT calibrated conviction)
+    # 3) verdict (v0, deterministic — ranked TIERS, NOT calibrated conviction; human signs off)
+    min_mos = POLICY.get("min_margin_of_safety", 0.40)
     book = cands[: args.max_positions]
     for i, c in enumerate(book, 1):
         c["rank"] = i
-        strong = c["f_score"] >= 7 and c["p_tbv"] <= 1.0 and (c["z_zone"] != "distress")
-        c["verdict"] = "BUY" if strong else "WATCH"
+        c["flags"] = [f for f, on in (
+            ("DISTRESS", c["z_zone"] == "distress"),
+            ("LOW_RUNWAY", (c["runway_months"] or 999) < 12),
+            ("DILUTING", (c["dilution"] or 0) > 0.05)) if on]
+        # BUY needs: strong quality + a real asset-value discount (policy) + not a flagged trap
+        buy = (c["f_score"] >= 7 and (c["margin_of_safety"] or 0) >= min_mos and not c["flags"])
+        c["verdict"] = "BUY" if buy else "WATCH"
 
+    n_buy = sum(1 for c in book if c["verdict"] == "BUY")
     print(f"=== v0 DEEP-VALUE FUNNEL @ {args.as_of} (deterministic, $0) ===")
-    print(f"investable universe: {len(cands)} | candidate book: {len(book)} "
-          f"(max {args.max_positions}) | human sign-off required on every BUY\n")
-    print(f"{'#':>2} {'tkr':<6}{'verdict':<8}{'comp':>6}{'F':>3}{'p/tbv':>7}{'dil%':>7}"
-          f"{'ev/ebit':>8}{'Z':>9}{'runwy':>6}{'ADV$':>11}")
+    print(f"investable universe: {len(cands)} | book: {len(book)} (max {args.max_positions}) "
+          f"| BUY: {n_buy} | human sign-off required on every BUY\n")
+    hdr = (f"{'#':>2} {'tkr':<6}{'verdict':<8}{'comp':>6}{'F':>3}{'p/tbv':>7}{'mos%':>6}"
+           f"{'dil%':>7}{'Z':>9}{'ADV$':>9}  flags")
+    print(hdr)
     for c in book:
         print(f"{c['rank']:>2} {c['ticker']:<6}{c['verdict']:<8}{c['composite']:>6.2f}"
               f"{c['f_score']:>3}{c['p_tbv']:>7.2f}"
+              f"{(c['margin_of_safety']*100 if c['margin_of_safety'] is not None else 0):>6.0f}"
               f"{(c['dilution']*100 if c['dilution'] is not None else 0):>7.1f}"
-              f"{(c['ev_ebit'] if c['ev_ebit'] is not None else float('nan')):>8.1f}"
-              f"{str(c['z_zone']):>9}{str(c['runway_months'] or ''):>6}{c['adv']/1e3:>10.0f}k")
+              f"{str(c['z_zone']):>9}{c['adv']/1e3:>8.0f}k  {','.join(c['flags'])}")
 
-    # 4) snapshot for the forward (IBKR paper) monitor
-    snap = {"as_of": args.as_of, "policy": "v0_free_quant",
-            "book": [{k: c[k] for k in ("rank", "ticker", "cik", "verdict", "price",
-                                        "composite", "f_score", "p_tbv", "adv")} for c in book]}
-    out = CACHE / f"book_{args.as_of}.json"
-    out.write_text(json.dumps(snap, indent=2))
-    print(f"\nsnapshot (entry prices for forward tracking) -> {out}")
+    # 4) artifacts: a human-readable recommendation + a snapshot (entry prices) for the
+    #    IBKR forward monitor. The system emits a recommendation only; it takes no action.
+    snap = {"as_of": args.as_of, "policy": "v0_free_quant", "n_investable": len(cands),
+            "book": [{k: c[k] for k in ("rank", "ticker", "cik", "verdict", "price", "composite",
+                      "f_score", "p_tbv", "margin_of_safety", "adv", "flags")} for c in book]}
+    (CACHE / f"book_{args.as_of}.json").write_text(json.dumps(snap, indent=2))
+
+    md = [f"# Deep-value candidate book — {args.as_of} (v0, deterministic)", "",
+          f"Investable universe: {len(cands)} · candidates: {len(book)} · BUY: {n_buy}", "",
+          "**Recommendation artifact for human review — no trading action taken. Every BUY "
+          "requires sign-off. Ranking is a deterministic composite of validated free signals "
+          "(Piotroski-F + low dilution + cheap-on-book), NOT a calibrated probability.**", "",
+          "| # | ticker | verdict | composite | F | p/tbv | margin-of-safety | div.yld dil% | Z | flags |",
+          "|--:|---|---|--:|--:|--:|--:|--:|---|---|"]
+    for c in book:
+        md.append(f"| {c['rank']} | {c['ticker']} | {c['verdict']} | {c['composite']:.2f} | "
+                  f"{c['f_score']} | {c['p_tbv']:.2f} | "
+                  f"{(c['margin_of_safety']*100 if c['margin_of_safety'] is not None else 0):.0f}% | "
+                  f"{(c['dilution']*100 if c['dilution'] is not None else 0):.1f}% | "
+                  f"{c['z_zone']} | {', '.join(c['flags']) or '—'} |")
+    out_md = CACHE / f"recommendation_{args.as_of}.md"
+    out_md.write_text("\n".join(md) + "\n")
+    print(f"\nartifacts -> {out_md}  +  book_{args.as_of}.json (entry prices for forward tracking)")
 
 
 if __name__ == "__main__":
