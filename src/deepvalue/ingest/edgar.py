@@ -79,7 +79,7 @@ def _user_agent() -> str:
     return ua
 
 
-_SEC_MIN_INTERVAL = 0.11   # SEC fair-access cap is ~10 req/s; gate live calls only
+_SEC_MIN_INTERVAL = 0.15   # SEC fair-access cap ~10 req/s; stay well under to avoid 10-min blocks
 _sec_last_call = 0.0
 
 
@@ -243,6 +243,73 @@ def filings_by_cik(cik: str, forms: tuple[str, ...] = ("10-K",)) -> list[dict]:
 def filing_doc_url_by_cik(cik: str, accession: str, primary_document: str) -> str:
     """Archives URL for a filing document, keyed by CIK (no ticker resolution)."""
     return f"{SEC_WWW_BASE}/Archives/edgar/data/{int(cik)}/{accession}/{primary_document}"
+
+
+# SIC is essentially static, so cache it PERMANENTLY in one small map (cik10 -> sic|"NA")
+# rather than re-hitting SEC every run — re-fetching hundreds of names per screen trips
+# SEC's ~10-minute rate block, which silently leaks banks into the screen.
+_SIC_MAP_PATH = REF_DIR / "cik_sic.json"
+_sic_map: dict[str, str] | None = None
+
+
+def _load_sic_map() -> dict[str, str]:
+    global _sic_map
+    if _sic_map is None:
+        try:
+            _sic_map = json.loads(_SIC_MAP_PATH.read_text())
+        except (FileNotFoundError, json.JSONDecodeError):
+            _sic_map = {}
+    return _sic_map
+
+
+def flush_sic_map() -> None:
+    if _sic_map is not None:
+        REF_DIR.mkdir(parents=True, exist_ok=True)
+        _SIC_MAP_PATH.write_text(json.dumps(_sic_map))
+
+
+def company_sic(cik: str) -> str | None:
+    """SIC code for a CIK, from a persistent map (fetched once from SEC submissions, then
+    reused forever). Used for sector exclusions (banks/insurers/blank-check) the screen
+    can't infer from financials. Returns None only if SEC can't be reached at all."""
+    cik10 = str(cik).zfill(10)
+    smap = _load_sic_map()
+    if cik10 in smap:
+        v = smap[cik10]
+        return None if v == "NA" else v
+    # opportunistically reuse a same-day submissions cache (from filings_by_cik) if present
+    cache_path = CACHE_DIR / f"CIK{cik10}_submissions_{date.today():%Y%m%d}.json"
+    data = None
+    if cache_path.exists():
+        try:
+            data = json.loads(cache_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            data = None
+    for attempt in range(3):
+        if data is not None:
+            break
+        try:
+            data = _get(f"{SEC_DATA_BASE}/submissions/CIK{cik10}.json")
+        except EdgarError:
+            time.sleep(0.8 * (attempt + 1))
+    if data is None:
+        return None                              # SEC unreachable — do NOT cache the miss
+    sic = data.get("sic")
+    smap[cik10] = str(sic) if sic else "NA"
+    flush_sic_map()
+    return str(sic) if sic else None
+
+
+# Excluded SIC ranges (spec §10 / policy: banks, insurers, blank-check — negative-WC or
+# book-value businesses where the value/trap metrics misfire).
+def is_excluded_sector(sic: str | None) -> bool:
+    if not sic or not sic.isdigit():
+        return False
+    n = int(sic)
+    return (6020 <= n <= 6300        # depository / non-depository credit (banks)
+            or 6310 <= n <= 6411     # insurance
+            or n in (6712, 6719)     # bank / holding companies (how most US banks file)
+            or n == 6770)            # blank checks
 
 
 def recent_filings(ticker: str, forms: tuple[str, ...] = ("10-Q", "10-K")) -> list[dict]:
