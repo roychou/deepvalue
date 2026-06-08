@@ -51,7 +51,8 @@ def _clip(x):
 def _cik_map() -> dict[str, str]:
     con = duckdb.connect(str(CACHE / "sharadar.duckdb"), read_only=True)
     out = {}
-    for tk, sf in con.execute("SELECT ticker, secfilings FROM tickers WHERE secfilings IS NOT NULL").fetchall():
+    for tk, sf in con.execute("SELECT ticker, secfilings FROM tickers WHERE secfilings IS NOT NULL "
+                              "AND category = 'Domestic Common Stock'").fetchall():  # 10-K filers only
         m = _CIK_RE.search(sf or "")
         if m and tk not in out:
             out[tk] = m.group(1)

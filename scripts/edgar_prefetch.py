@@ -39,7 +39,10 @@ _CIK_RE = re.compile(r"CIK=(\d+)")
 def _cheap_work(per_cohort: int, from_cohort: str) -> list[dict]:
     con = duckdb.connect(str(CACHE / "sharadar.duckdb"), read_only=True)
     cikmap = {}
-    for tk, sf in con.execute("SELECT ticker, secfilings FROM tickers WHERE secfilings IS NOT NULL").fetchall():
+    # domestic common stock ONLY — foreign issuers (ADRs) file 20-F/40-F, not the 10-K
+    # MD&A the L3 signal reads, so they'd be unresolvable here.
+    for tk, sf in con.execute("SELECT ticker, secfilings FROM tickers WHERE secfilings IS NOT NULL "
+                              "AND category = 'Domestic Common Stock'").fetchall():
         m = _CIK_RE.search(sf or "")
         if m and tk not in cikmap:
             cikmap[tk] = m.group(1)
