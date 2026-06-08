@@ -27,12 +27,13 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from datetime import date, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-import requests
+import httpx
 
 from deepvalue.ingest.fundamentals import calc_debt_equity, calc_growth_yoy, calc_margin
 
@@ -78,10 +79,25 @@ def _user_agent() -> str:
     return ua
 
 
+_SEC_MIN_INTERVAL = 0.15   # SEC fair-access cap ~10 req/s; stay well under to avoid 10-min blocks
+_sec_last_call = 0.0
+
+
+def _sec_throttle() -> None:
+    """Block briefly so successive SEC network calls stay under the rate cap. Applied
+    only inside the network helpers, so cached reads (the common case) pay nothing."""
+    global _sec_last_call
+    wait = _sec_last_call + _SEC_MIN_INTERVAL - time.monotonic()
+    if wait > 0:
+        time.sleep(wait)
+    _sec_last_call = time.monotonic()
+
+
 def _get(url: str) -> Any:
+    _sec_throttle()
     try:
-        resp = requests.get(url, headers={"User-Agent": _user_agent()}, timeout=TIMEOUT_SECONDS)
-    except requests.RequestException as e:
+        resp = httpx.get(url, headers={"User-Agent": _user_agent()}, timeout=TIMEOUT_SECONDS)
+    except httpx.RequestError as e:
         raise EdgarError(f"EDGAR request failed: {e}") from e
     if resp.status_code != 200:
         raise EdgarError(f"EDGAR returned {resp.status_code} for {url}: {resp.text[:200]}")
@@ -180,6 +196,122 @@ def _submissions(ticker: str) -> dict:
     return data
 
 
+def _parse_recent_filings(recent: dict, forms: tuple[str, ...]) -> list[dict]:
+    """Shape the SEC `filings.recent` blob into our filing records, newest first."""
+    out = [
+        {
+            "form": form,
+            "filed": filed,
+            "accession": acc.replace("-", ""),
+            "primary_document": doc,
+        }
+        for form, filed, acc, doc in zip(
+            recent.get("form", []),
+            recent.get("filingDate", []),
+            recent.get("accessionNumber", []),
+            recent.get("primaryDocument", []),
+        )
+        if form in forms
+    ]
+    out.sort(key=lambda f: f["filed"], reverse=True)
+    return out
+
+
+def filings_by_cik(cik: str, forms: tuple[str, ...] = ("10-K",)) -> list[dict]:
+    """Filings for a CIK directly — the survivorship-correct path for the L3 backtest.
+
+    Delisted tickers don't resolve in the current SEC ticker map (and reuse would point
+    to the wrong company), but a permanent CIK does — and the price-grab manifest already
+    carries each name's CIK. Keyed by CIK (zero-padded to 10 digits) + today (the recent
+    blob is mutable). Returns [] on any fetch error so one bad name can't abort a sweep.
+    """
+    cik10 = str(cik).zfill(10)
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cache_path = CACHE_DIR / f"CIK{cik10}_submissions_{date.today():%Y%m%d}.json"
+    try:
+        if cache_path.exists():
+            data = json.loads(cache_path.read_text())
+        else:
+            data = _get(f"{SEC_DATA_BASE}/submissions/CIK{cik10}.json")
+            cache_path.write_text(json.dumps(data))
+    except EdgarError as e:
+        logger.warning(f"filings_by_cik({cik10}) failed: {e}")
+        return []
+    return _parse_recent_filings(data.get("filings", {}).get("recent", {}), forms)
+
+
+def filing_doc_url_by_cik(cik: str, accession: str, primary_document: str) -> str:
+    """Archives URL for a filing document, keyed by CIK (no ticker resolution)."""
+    return f"{SEC_WWW_BASE}/Archives/edgar/data/{int(cik)}/{accession}/{primary_document}"
+
+
+# SIC is essentially static, so cache it PERMANENTLY in one small map (cik10 -> sic|"NA")
+# rather than re-hitting SEC every run — re-fetching hundreds of names per screen trips
+# SEC's ~10-minute rate block, which silently leaks banks into the screen.
+_SIC_MAP_PATH = REF_DIR / "cik_sic.json"
+_sic_map: dict[str, str] | None = None
+
+
+def _load_sic_map() -> dict[str, str]:
+    global _sic_map
+    if _sic_map is None:
+        try:
+            _sic_map = json.loads(_SIC_MAP_PATH.read_text())
+        except (FileNotFoundError, json.JSONDecodeError):
+            _sic_map = {}
+    return _sic_map
+
+
+def flush_sic_map() -> None:
+    if _sic_map is not None:
+        REF_DIR.mkdir(parents=True, exist_ok=True)
+        _SIC_MAP_PATH.write_text(json.dumps(_sic_map))
+
+
+def company_sic(cik: str) -> str | None:
+    """SIC code for a CIK, from a persistent map (fetched once from SEC submissions, then
+    reused forever). Used for sector exclusions (banks/insurers/blank-check) the screen
+    can't infer from financials. Returns None only if SEC can't be reached at all."""
+    cik10 = str(cik).zfill(10)
+    smap = _load_sic_map()
+    if cik10 in smap:
+        v = smap[cik10]
+        return None if v == "NA" else v
+    # opportunistically reuse a same-day submissions cache (from filings_by_cik) if present
+    cache_path = CACHE_DIR / f"CIK{cik10}_submissions_{date.today():%Y%m%d}.json"
+    data = None
+    if cache_path.exists():
+        try:
+            data = json.loads(cache_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            data = None
+    for attempt in range(3):
+        if data is not None:
+            break
+        try:
+            data = _get(f"{SEC_DATA_BASE}/submissions/CIK{cik10}.json")
+        except EdgarError:
+            time.sleep(0.8 * (attempt + 1))
+    if data is None:
+        return None                              # SEC unreachable — do NOT cache the miss
+    sic = data.get("sic")
+    smap[cik10] = str(sic) if sic else "NA"
+    flush_sic_map()
+    return str(sic) if sic else None
+
+
+# Excluded SIC ranges (spec §10 / policy: banks, insurers, blank-check — negative-WC or
+# book-value businesses where the value/trap metrics misfire).
+def is_excluded_sector(sic: str | None) -> bool:
+    if not sic or not sic.isdigit():
+        return False
+    n = int(sic)
+    return (6020 <= n <= 6300        # depository / non-depository credit (banks)
+            or 6310 <= n <= 6411     # insurance
+            or n in (6712, 6719)     # bank / holding companies (how most US banks file)
+            or n == 6770)            # blank checks
+
+
 def recent_filings(ticker: str, forms: tuple[str, ...] = ("10-Q", "10-K")) -> list[dict]:
     """Structured recent filings, newest first: {form, filed, accession, primary_document}.
 
@@ -220,9 +352,10 @@ def recent_filing_dates(ticker: str, forms: tuple[str, ...] = ("10-Q", "10-K")) 
 
 def _get_text(url: str) -> str:
     """GET a URL and return raw text (filing documents are HTML, not JSON)."""
+    _sec_throttle()
     try:
-        resp = requests.get(url, headers={"User-Agent": _user_agent()}, timeout=TIMEOUT_SECONDS)
-    except requests.RequestException as e:
+        resp = httpx.get(url, headers={"User-Agent": _user_agent()}, timeout=TIMEOUT_SECONDS)
+    except httpx.RequestError as e:
         raise EdgarError(f"EDGAR request failed: {e}") from e
     if resp.status_code != 200:
         raise EdgarError(f"EDGAR returned {resp.status_code} for {url}: {resp.text[:200]}")

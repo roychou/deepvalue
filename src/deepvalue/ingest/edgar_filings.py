@@ -21,6 +21,7 @@ from deepvalue.ingest.edgar import (
     CACHE_DIR,
     SEC_WWW_BASE,
     _get_text,
+    filing_doc_url_by_cik,
     ticker_to_cik,
 )
 
@@ -71,6 +72,18 @@ def fetch_filing_document(ticker: str, accession: str, primary_document: str) ->
     if path.exists():
         return path.read_text(encoding="utf-8", errors="ignore")
     html = _get_text(filing_url(ticker, accession, primary_document))
+    path.write_text(html, encoding="utf-8")
+    return html
+
+
+def fetch_filing_document_by_cik(cik: str, accession: str, primary_document: str) -> str:
+    """Like `fetch_filing_document` but keyed by CIK — the survivorship-correct path for
+    delisted names whose ticker no longer resolves. Cached by accession (immutable)."""
+    FILINGS_DIR.mkdir(parents=True, exist_ok=True)
+    path = FILINGS_DIR / f"CIK{str(cik).zfill(10)}_{accession}.htm"
+    if path.exists():
+        return path.read_text(encoding="utf-8", errors="ignore")
+    html = _get_text(filing_doc_url_by_cik(cik, accession, primary_document))
     path.write_text(html, encoding="utf-8")
     return html
 

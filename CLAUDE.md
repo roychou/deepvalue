@@ -54,8 +54,11 @@ Each module docstring marks its status. Already ported and working (IC tests pas
 - `ingest/fmp_client.py` + `scripts/fmp_survivorship_probe.py` — FMP client + survivorship probe.
 - `ingest/prices.py` — **PORTED (done)**: `get_prices(ticker)` reads the FMP grab cache
   (`data/cache/prices/`), unioning a ticker's active + delisted keys into `{date: {close,...}}`.
-Greenfield (not started): full segmentation (`ingest/segmentation.py`), trap signals
-(`quant/trap_signals.py`), all `agents/subagents/*`, calibration (`calibration/*`).
+Built (Phase 1 + 2, this work): `diff/align.py` (section_change + masking), `diff/materiality.py`
+(Sonnet materiality reader — **the validated edge**), `ingest/fundamentals_store.py` (point-in-time),
+`quant/metrics.py` + `quant/trap_signals.py` + `quant/screen.py` (L1 gate). Greenfield (not
+started): full segmentation (`ingest/segmentation.py`), L2 triage (`triage/*`), all
+`agents/subagents/*`, calibration (`calibration/*`).
 
 ## Data
 - **EDGAR** (free): filing text + post-2009 XBRL fundamentals. Set `SEC_USER_AGENT`; ~10 req/s cap.

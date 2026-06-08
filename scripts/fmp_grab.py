@@ -268,18 +268,47 @@ async def grab_name(client, gate, budget, sem, entry: dict, want_fund: bool,
                                           "rows": prices}))
 
     if want_fund:
-        inc = await fetch(client, gate, budget, sem, "income-statement",
-                          {"symbol": sym, "limit": 200})
-        bal = await fetch(client, gate, budget, sem, "balance-sheet-statement",
-                          {"symbol": sym, "limit": 200})
-        inc = inc if isinstance(inc, list) else []
-        bal = bal if isinstance(bal, list) else []
-        rec["n_income"], rec["n_balance"] = len(inc), len(bal)
-        if inc or bal:
-            DIR_FUND.mkdir(parents=True, exist_ok=True)
-            (DIR_FUND / f"{key}.json").write_text(
-                json.dumps({"symbol": sym, "cik": cik, "income": inc, "balance": bal}))
+        await _grab_fundamentals(client, gate, budget, sem, key, sym, cik, rec)
     return rec
+
+
+async def _grab_fundamentals(client, gate, budget, sem, key, sym, cik, rec) -> dict:
+    """Fetch income + balance + CASH-FLOW for one name and write the fundamentals file.
+    Cash flow is needed for Piotroski/Beneish (no more approximation). Shared by the full
+    grab and the fundamentals-only re-grab."""
+    inc = await fetch(client, gate, budget, sem, "income-statement", {"symbol": sym, "limit": 200})
+    bal = await fetch(client, gate, budget, sem, "balance-sheet-statement", {"symbol": sym, "limit": 200})
+    cf = await fetch(client, gate, budget, sem, "cash-flow-statement", {"symbol": sym, "limit": 200})
+    inc = inc if isinstance(inc, list) else []
+    bal = bal if isinstance(bal, list) else []
+    cf = cf if isinstance(cf, list) else []
+    rec["n_income"], rec["n_balance"], rec["n_cash"] = len(inc), len(bal), len(cf)
+    if not cik and (inc or bal or cf):
+        cik = (inc or bal or cf)[0].get("cik")
+    if inc or bal or cf:
+        DIR_FUND.mkdir(parents=True, exist_ok=True)
+        (DIR_FUND / f"{key}.json").write_text(
+            json.dumps({"symbol": sym, "cik": cik, "income": inc, "balance": bal, "cashflow": cf}))
+        rec["fund_coverage"] = "present"
+    else:
+        rec["fund_coverage"] = "absent"
+    return rec
+
+
+async def grab_fundamentals_only(client, gate, budget, sem, entry: dict) -> dict:
+    """Fundamentals-only re-grab: (re)fetch income+balance+cash-flow regardless of price
+    state. Resumable on CASH-FLOW presence — a file that already has cashflow is skipped,
+    so this recovers transient-missing names AND backfills cash-flow on the rest."""
+    key = cache_key(entry)
+    fp = DIR_FUND / f"{key}.json"
+    if fp.exists():
+        try:
+            if json.loads(fp.read_text()).get("cashflow"):
+                return {"key": key, "symbol": entry["symbol"], "fund_coverage": "cached"}
+        except (json.JSONDecodeError, OSError):
+            pass
+    rec = {"key": key, "symbol": entry["symbol"], "status": entry["status"]}
+    return await _grab_fundamentals(client, gate, budget, sem, key, entry["symbol"], None, rec)
 
 
 # --------------------------------------------------------------------- run ----
@@ -297,6 +326,28 @@ async def run(args) -> None:
             roster = json.loads(roster_path.read_text())
             log.info("loaded roster: %d names", len(roster))
         if args.phase == "universe":
+            return
+
+        if args.phase == "fundamentals":
+            # Perishable re-grab: income + balance + CASH-FLOW for every name, resumable on
+            # cash-flow presence. Recovers transient-missing delisted fundamentals and adds
+            # cash flow (removing the Piotroski/Beneish CFO approximation). Side manifest.
+            out = CACHE / "manifest_fundamentals.json"
+            fman, done = [], 0
+            for entry in roster:
+                if budget.exhausted():
+                    log.warning("call budget exhausted — stopping early"); break
+                fman.append(await grab_fundamentals_only(client, gate, budget, sem, entry))
+                done += 1
+                if done % 200 == 0:
+                    log.info("fundamentals %d/%d calls=%d", done, len(roster), budget.n)
+                    out.write_text(json.dumps(fman, indent=2))
+            out.write_text(json.dumps(fman, indent=2))
+            pres = sum(1 for m in fman if m.get("fund_coverage") == "present")
+            cac = sum(1 for m in fman if m.get("fund_coverage") == "cached")
+            ab = sum(1 for m in fman if m.get("fund_coverage") == "absent")
+            log.info("FUNDAMENTALS DONE %d | present=%d cached=%d absent=%d calls=%d -> %s",
+                     len(fman), pres, cac, ab, budget.n, out)
             return
 
         # A symbol in >1 roster row is *usually NOT* ticker reuse — it's the same company
@@ -360,7 +411,8 @@ def main() -> None:
     ap.add_argument("--skip-fundamentals", action="store_true")
     ap.add_argument("--only-absent", action="store_true",
                     help="retry just the prior run's absent names (-> manifest_backfill.json)")
-    ap.add_argument("--phase", choices=["all", "universe"], default="all")
+    ap.add_argument("--phase", choices=["all", "universe", "fundamentals"], default="all",
+                    help="'fundamentals' = re-grab income+balance+cash-flow only (resumable)")
     asyncio.run(run(ap.parse_args()))
 
 
