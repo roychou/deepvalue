@@ -41,6 +41,7 @@ OUT_DIR = ROOT / "data" / "forward"
 RECENCY_DAYS = 550   # fundamentals must be filed within ~18 months to count as "current"
 ADV_WINDOW = 60
 MIN_F_CHECKS = 7     # EDGAR micro-cap XBRL is incomplete; relax the backtest's strict ==9
+DET_KILL = 0.5       # MD&A deterioration >= this flags DETERIORATING + blocks BUY (L3 lead)
 
 
 def _adv(prices: dict, as_of: str) -> float | None:
@@ -161,13 +162,15 @@ def _write_artifacts(as_of: str, n_universe: int, cands: list[dict], book: list[
              f"Live universe (recent EDGAR filers, listed, screenable): {len(cands)} · "
              f"book: {len(book)} · BUY: {n_buy}", "",
              "Recommendation artifact — NO trading action taken. Every BUY needs human sign-off.", "",
-             "| # | Ticker | Verdict | Price | P/TBV | MoS | F | Dil | Flags |",
-             "|---|--------|---------|------:|------:|----:|--:|----:|-------|"]
+             "| # | Ticker | Verdict | Price | P/TBV | MoS | F | Dil | Det | Flags |",
+             "|---|--------|---------|------:|------:|----:|--:|----:|----:|-------|"]
     for c in book:
         mos = f"{c['margin_of_safety']:.0%}" if c["margin_of_safety"] is not None else "—"
         dil = f"{c['dilution']:+.1%}" if c["dilution"] is not None else "—"
+        det = f"{c['deterioration']:.2f}" if c.get("deterioration") is not None else "—"
         lines.append(f"| {c['rank']} | {c['ticker']} | {c['verdict']} | {c['price']:.2f} | "
-                     f"{c['p_tbv']:.2f} | {mos} | {c['f_score']} | {dil} | {','.join(c['flags']) or '—'} |")
+                     f"{c['p_tbv']:.2f} | {mos} | {c['f_score']} | {dil} | {det} | "
+                     f"{','.join(c['flags']) or '—'} |")
     (OUT_DIR / f"recommendation_{as_of}.md").write_text("\n".join(lines) + "\n")
 
 
@@ -208,16 +211,33 @@ async def _session(as_of: str, days_back: int, max_positions: int, p_tbv_max: fl
         cands, book = build_book(survivors, prices, as_of, max_positions, p_tbv_max, min_f, adv_floor)
         log.info("screened: %d candidates -> book of %d", len(cands), len(book))
 
-        # 5) MD&A Deterioration Lead — OPT-IN, budget-capped (the spend rule)
+        # 5) MD&A Deterioration Lead — OPT-IN, budget-capped (the spend rule). The validated
+        #    edge: softening YoY 10-K language LEADS distress, so a deteriorating name is a
+        #    trap-in-waiting even if the screen looks clean -> flag it and block it from BUY.
+        l3_note = ""
         if max_llm_usd > 0 and book:
-            log.warning("Deterioration Lead requested ($%.0f cap) — not yet wired; screen-only "
-                        "book emitted. (next: current+prior 10-K MD&A -> diff -> materiality)",
-                        max_llm_usd)
+            from anthropic import Anthropic
+
+            from deepvalue.forward.deterioration import score_deterioration
+            det, spent = score_deterioration(book, as_of, Anthropic(), max_llm_usd=max_llm_usd)
+            for c in book:
+                r = det.get(c["ticker"])
+                if r is None:
+                    continue
+                c["deterioration"] = round(r.deterioration, 3)
+                c["det_categories"] = r.categories
+                if r.deterioration >= DET_KILL:
+                    if "DETERIORATING" not in c["flags"]:
+                        c["flags"].append("DETERIORATING")
+                    if c["verdict"] == "BUY":  # leading-indicator kill: never BUY softening language
+                        c["verdict"] = "WATCH"
+            log.info("Deterioration Lead: scored %d/%d names, spent $%.2f", len(det), len(book), spent)
+            l3_note = f" | L3 scored {len(det)} (${spent:.2f})"
 
         _write_artifacts(as_of, len(universe), cands, book)
         n_buy = sum(1 for c in book if c["verdict"] == "BUY")
         digest = (f"{as_of}: {len(cands)} candidates, book {len(book)}, {n_buy} BUY "
-                  f"(acct {acct})")
+                  f"(acct {acct}){l3_note}")
 
         # 6) paper rebalance toward the BUY book — preview unless --transmit (opt-in)
         if execute == "ibkr":
