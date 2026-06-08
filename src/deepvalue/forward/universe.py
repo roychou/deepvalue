@@ -17,7 +17,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, timedelta
 
-from deepvalue.ingest.edgar import EdgarError, _get_text, _load_cik_map
+from deepvalue.ingest.edgar import (
+    EdgarError,
+    _ensure_cik_map_fresh,
+    _get_text,
+    _load_cik_map,
+)
 
 SEC_WWW_BASE = "https://www.sec.gov"
 
@@ -108,6 +113,7 @@ def cik_to_ticker_map() -> dict[str, str]:
     to price the name (IBKR) and pull its fundamentals. CIKs absent from the map (most
     micro-caps without a current common-stock ticker) simply won't resolve — the session
     drops them, which is correct (un-priceable names aren't tradeable)."""
+    _ensure_cik_map_fresh()  # fetch the SEC map if absent/stale (fresh container has none)
     out: dict[str, str] = {}
     for ticker, cik in _load_cik_map().items():
         out.setdefault(str(int(cik)), ticker)  # first (canonical) ticker wins for a CIK
