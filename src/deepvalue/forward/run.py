@@ -130,9 +130,12 @@ def build_book(universe: list[tuple[str, str]], prices_by_ticker: dict[str, dict
     dz = _z([c["dilution"] for c in cands if c["dilution"] is not None])
     pz = _z([c["p_tbv"] for c in cands])
     for c in cands:
-        comp = (c["f_score"] - fz["mu"]) / fz["sd"] - (c["p_tbv"] - pz["mu"]) / pz["sd"]
-        if c["dilution"] is not None and dz:
-            comp += -(c["dilution"] - dz["mu"]) / dz["sd"]
+        if fz and pz:  # enough names (>=3) to z-score the cross-section
+            comp = (c["f_score"] - fz["mu"]) / fz["sd"] - (c["p_tbv"] - pz["mu"]) / pz["sd"]
+            if c["dilution"] is not None and dz:
+                comp += -(c["dilution"] - dz["mu"]) / dz["sd"]
+        else:  # tiny candidate set — rank by quality then cheapness (no cross-section to scale)
+            comp = c["f_score"] - c["p_tbv"]
         c["composite"] = round(comp, 3)
     cands.sort(key=lambda c: c["composite"], reverse=True)
 
