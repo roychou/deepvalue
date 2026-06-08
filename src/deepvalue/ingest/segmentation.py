@@ -15,11 +15,15 @@ Returns the section text, a confidence, which method found it, and sentence IDs 
 """
 from __future__ import annotations
 
+import json
+import logging
 import re
 from dataclasses import dataclass
 
 from deepvalue.ingest.edgar_filings import clean_text
 from deepvalue.ingest.normalize import to_sentences
+
+log = logging.getLogger("tedium.segmentation")
 
 _APOS = "['’‘]?"  # straight / curly apostrophe, optional
 
@@ -47,10 +51,20 @@ class Section:
     text: str | None
     method: str                # "heuristic" | "llm" | "none"
     confidence: float
+    cost_usd: float = 0.0      # LLM-fallback spend (0 for the deterministic path)
 
     @property
     def sentences(self) -> list[dict]:
         return to_sentences(self.text) if self.text else []
+
+
+@dataclass
+class SegLLM:
+    """Config for the locate-a-boundary fallback. The task is easy -> a cheap model (Haiku)."""
+    client: object             # anthropic.Anthropic
+    model: str
+    spec: object               # models.ModelSpec (for cost)
+    cap_usd: float
 
 
 def _toc_end(text: str) -> int:
@@ -98,23 +112,67 @@ def _heuristic_mdna(clean: str) -> str | None:
     return None
 
 
-def segment_mdna(html: str, form: str, *, llm_client=None, max_llm_usd: float = 0.0) -> Section:
-    """Carve MD&A from a filing's HTML. Deterministic by default; pass llm_client + a cap to
-    enable the locate-a-boundary fallback on the names heuristics miss (opt-in; spends LLM)."""
+_LOCATE_PROMPT = (
+    "Below is plain text from a SEC 10-K, starting near Management's Discussion and Analysis "
+    "(Item 7). Return STRICT JSON: {\"start_phrase\": <first ~10 words of the MD&A section body>, "
+    "\"end_phrase\": <first ~10 words of the section that immediately FOLLOWS MD&A, e.g. 'Item 7A "
+    "Quantitative and Qualitative...' or 'Item 8 Financial Statements...'>}. Copy the phrases "
+    "VERBATIM from the text so they can be located. If there is no MD&A body here, return "
+    "{\"start_phrase\": null, \"end_phrase\": null}.\n\nTEXT:\n"
+)
+
+
+def _llm_locate(clean: str, seg: SegLLM) -> tuple[str | None, float]:
+    """Ask the cheap model for the MD&A start/end PHRASES, then slice the deterministic text
+    between them (lean output, no hallucinated content). Returns (mdna_or_none, cost_usd)."""
+    from deepvalue.diff.materiality import call_cost_usd
+
+    starts = _find(clean, _MDNA_STARTS)
+    region_start = starts[0] if starts else 0
+    region = clean[region_start: region_start + 140_000]  # from the first MD&A cue; bound tokens
+    try:
+        resp = seg.client.messages.create(
+            model=seg.model, max_tokens=300,
+            messages=[{"role": "user", "content": _LOCATE_PROMPT + region}])
+    except Exception as e:  # noqa: BLE001 — fallback failure just drops the name
+        log.warning("LLM locate failed: %s", type(e).__name__)
+        return None, 0.0
+    cost = call_cost_usd(resp.usage, spec=seg.spec)
+    try:
+        txt = resp.content[0].text
+        obj = json.loads(re.search(r"\{.*\}", txt, re.S).group(0))
+        sp, ep = obj.get("start_phrase"), obj.get("end_phrase")
+    except Exception:  # noqa: BLE001
+        return None, cost
+    if not sp:
+        return None, cost
+    si = clean.lower().find(sp.strip().lower()[:48])
+    if si < 0:
+        return None, cost
+    ei = clean.lower().find(ep.strip().lower()[:48], si + _MIN_CHARS) if ep else -1
+    body = clean[si: ei if ei > si else si + _MAX_CHARS].strip()
+    if not (_MIN_CHARS <= len(body) <= _MAX_CHARS) or _ANCHOR not in body.lower():
+        return None, cost
+    return body, cost
+
+
+def segment_mdna(html: str, form: str, *, seg_llm: SegLLM | None = None) -> Section:
+    """Carve MD&A from a filing's HTML. Deterministic by default; pass seg_llm to enable the
+    locate-a-boundary fallback on the ~35% the heuristics miss (opt-in; spends a little LLM)."""
     base = form.upper().split("/")[0]
     clean = clean_text(html)
     seg = _heuristic_mdna(clean)
     if seg:
         return Section(f"{base}.mdna", seg, "heuristic", 0.9)
-    if llm_client is not None and max_llm_usd > 0:
-        # TODO(fallback): ask the cheap 'segmentation' model for MD&A start/end offsets given the
-        # candidate headers (NOT the whole filing). Only worth wiring if the heuristic residual
-        # is large — measure first. Spends LLM => operator go + cap.
-        pass
+    if seg_llm is not None and seg_llm.cap_usd > 0:
+        body, cost = _llm_locate(clean, seg_llm)
+        if body:
+            return Section(f"{base}.mdna", body, "llm", 0.7, cost)
+        return Section(f"{base}.mdna", None, "none", 0.0, cost)
     return Section(f"{base}.mdna", None, "none", 0.0)
 
 
-def extract_mdna(html: str, form: str) -> str | None:
+def extract_mdna(html: str, form: str, *, seg_llm: SegLLM | None = None) -> str | None:
     """Convenience: just the MD&A text (or None). The drop-in L3 uses in place of the old
     edgar_filings.extract_sections(...).get('mdna')."""
-    return segment_mdna(html, form).text
+    return segment_mdna(html, form, seg_llm=seg_llm).text

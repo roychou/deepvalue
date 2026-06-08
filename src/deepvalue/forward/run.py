@@ -219,20 +219,35 @@ async def _session(as_of: str, days_back: int, max_positions: int, p_tbv_max: fl
             from anthropic import Anthropic
 
             from deepvalue.forward.deterioration import score_deterioration
-            det, spent = score_deterioration(book, as_of, Anthropic(), max_llm_usd=max_llm_usd)
+            from deepvalue.ingest.segmentation import SegLLM
+            from deepvalue.models import LEAF
+            client = Anthropic()
+            # Haiku locate-fallback for the ~35% of filings the heuristic segmenter misses;
+            # shares the same hard cap as the Sonnet materiality read.
+            seg_llm = SegLLM(client=client, model=LEAF.id, spec=LEAF, cap_usd=max_llm_usd)
+            det, spent = score_deterioration(book, as_of, client, max_llm_usd=max_llm_usd,
+                                             seg_llm=seg_llm)
             for c in book:
                 r = det.get(c["ticker"])
-                if r is None:
-                    continue
-                c["deterioration"] = round(r.deterioration, 3)
-                c["det_categories"] = r.categories
-                if r.deterioration >= DET_KILL:
-                    if "DETERIORATING" not in c["flags"]:
-                        c["flags"].append("DETERIORATING")
-                    if c["verdict"] == "BUY":  # leading-indicator kill: never BUY softening language
-                        c["verdict"] = "WATCH"
-            log.info("Deterioration Lead: scored %d/%d names, spent $%.2f", len(det), len(book), spent)
-            l3_note = f" | L3 scored {len(det)} (${spent:.2f})"
+                if r is not None:
+                    c["deterioration"] = round(r.deterioration, 3)
+                    c["det_categories"] = r.categories
+                    if r.deterioration >= DET_KILL:  # leading-indicator kill: softening language
+                        if "DETERIORATING" not in c["flags"]:
+                            c["flags"].append("DETERIORATING")
+                        if c["verdict"] == "BUY":
+                            c["verdict"] = "WATCH"
+                elif c["verdict"] == "BUY":
+                    # SAFETY GATE: no clean MD&A read -> can't clear a BUY of trap risk. Require
+                    # L3 clearance for BUY, so an extraction miss is a MISSED buy (conservative,
+                    # Burry-tilt default), never a blind buy of a name we couldn't read.
+                    c["verdict"] = "WATCH"
+                    if "NO_L3_READ" not in c["flags"]:
+                        c["flags"].append("NO_L3_READ")
+            n_blocked = sum(1 for c in book if "NO_L3_READ" in c["flags"])
+            log.info("Deterioration Lead: scored %d/%d, spent $%.2f (%d BUY blocked: no read)",
+                     len(det), len(book), spent, n_blocked)
+            l3_note = f" | L3 {len(det)}/{len(book)} (${spent:.2f})"
 
         _write_artifacts(as_of, len(universe), cands, book)
         n_buy = sum(1 for c in book if c["verdict"] == "BUY")
