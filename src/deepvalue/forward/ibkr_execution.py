@@ -143,15 +143,33 @@ async def execute_orders(ib: IB, plans: list[OrderPlan], *, transmit: bool = Fal
     return results
 
 
-async def rebalance(ib: IB, buys: list[str], prices: dict[str, float], *,
-                    max_positions: int, max_weight: float, transmit: bool = False) -> dict:
-    """Read the paper account and move it toward the BUY book: equal weight = 1/max_positions,
-    capped at the policy per-name max_weight. Preview by default. Returns account + plan + results."""
+def conviction_weights(buys: list[dict], *, kelly_fraction: float, max_weight: float) -> dict[str, float]:
+    """Fractional-Kelly-STYLE, conviction-weighted, per-name-capped, no-leverage target weights
+    (policy.yaml: sizing=fractional_kelly). Conviction proxy = margin of safety (the asset cushion
+    — bigger discount to conservative asset value = bigger edge), so weight_i = min(max_weight,
+    kelly_fraction * mos_i); gross is scaled to <=1 (long-only, no leverage) and the remainder
+    stays CASH (Kelly: bet less when the edge is thin). NOTE: a true edge/variance Kelly awaits L7
+    calibration; until then margin of safety is the honest, asset-backed stand-in."""
+    w: dict[str, float] = {}
+    for c in buys:
+        mos = c.get("margin_of_safety") or 0.0
+        conviction = max(0.0, min(1.0, mos))
+        w[c["ticker"]] = min(max_weight, kelly_fraction * conviction)
+    gross = sum(w.values())
+    if gross > 1.0:  # never lever; scale the book down to fully-invested
+        w = {t: x / gross for t, x in w.items()}
+    return w
+
+
+async def rebalance(ib: IB, buys: list[dict], prices: dict[str, float], *,
+                    kelly_fraction: float, max_weight: float, transmit: bool = False) -> dict:
+    """Read the paper account and move it toward the BUY book using conviction-weighted
+    fractional-Kelly sizing (cash residual). `buys` are the BUY candidate dicts (need
+    margin_of_safety). Preview by default. Returns account + weights + plan + results."""
     state = account_state(ib)
-    weight = min(1.0 / max_positions, max_weight) if max_positions else max_weight
-    target_weights = {t: weight for t in buys}
+    target_weights = conviction_weights(buys, kelly_fraction=kelly_fraction, max_weight=max_weight)
     plans = plan_rebalance(state, target_weights, prices)
     results = await execute_orders(ib, plans, transmit=transmit)
     return {"account": state.account, "equity": state.equity, "transmit": transmit,
-            "n_targets": len(buys), "plans": [(p.side, p.quantity, p.ticker) for p in plans],
-            "results": results}
+            "n_targets": len(buys), "weights": {t: round(x, 4) for t, x in target_weights.items()},
+            "plans": [(p.side, p.quantity, p.ticker) for p in plans], "results": results}

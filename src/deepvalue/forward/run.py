@@ -256,10 +256,10 @@ async def _session(as_of: str, days_back: int, max_positions: int, p_tbv_max: fl
 
         # 6) paper rebalance toward the BUY book — preview unless --transmit (opt-in)
         if execute == "ibkr":
-            buys = [c["ticker"] for c in book if c["verdict"] == "BUY"]
+            buys = [c for c in book if c["verdict"] == "BUY"]  # candidate dicts (carry margin_of_safety)
             last_close = {t: px[max(px)]["close"] for t, px in prices.items() if px}
             rb = await ibkr_execution.rebalance(
-                ib, buys, last_close, max_positions=max_positions,
+                ib, buys, last_close, kelly_fraction=POLICY.get("kelly_fraction", 0.25),
                 max_weight=POLICY.get("max_position_weight", 0.06), transmit=transmit)
             mode = "TRANSMITTED" if transmit else "PREVIEW"
             log.info("rebalance (%s): %d orders planned", mode, len(rb["plans"]))

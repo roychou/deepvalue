@@ -204,21 +204,35 @@ _NOTE_HEADER = re.compile(r"(?:Note\s+\d+\b|NOTE\s+\d+\b)", re.IGNORECASE)
 _FN_MIN, _FN_MAX = 300, 14_000
 
 
+def _note_boundaries(clean: str) -> list[int]:
+    """Offsets where a note ends / the next begins: every 'Note N' header, plus any footnote
+    TOPIC title that looks like a HEADER (preceded by a digit or period — i.e. 'N. Leases',
+    not a mid-prose 'operating leases'). Tightens captures without false-cutting on content words."""
+    bounds = {m.start() for m in _NOTE_HEADER.finditer(clean)}
+    for pats in _FOOTNOTE_TOPICS.values():
+        for pat in pats:
+            for m in re.finditer(pat, clean, re.IGNORECASE):
+                if re.search(r"[.\d]\s*$", clean[max(0, m.start() - 3):m.start()]):
+                    bounds.add(m.start())
+    return sorted(bounds)
+
+
 def extract_footnote(clean_or_html: str, topic: str, *, is_html: bool = True) -> str | None:
     """Topic-specific footnote text (e.g. 'related_party', 'commitments_contingencies', 'leases',
-    'debt') from a 10-K. Heuristic: every title occurrence is captured to its next 'Note N' header
-    (bounded); the LARGEST valid body wins — the real note is substantial, while a TOC entry or a
-    'see Note X' cross-reference is cut short by the very next header. Irregular notes are skipped
-    (the L4 agent just has less to cite), never mis-bounded."""
+    'debt') from a 10-K. Heuristic: every title occurrence is captured to the NEXT note boundary
+    (a 'Note N' header or a header-like topic title), bounded; the LARGEST valid body wins — the
+    real note is substantial, while a TOC entry or a 'see Note X' cross-reference is cut short by
+    the very next boundary. Irregular notes are skipped, never mis-bounded."""
     pats = _FOOTNOTE_TOPICS.get(topic)
     if not pats:
         return None
     clean = clean_text(clean_or_html) if is_html else clean_or_html
+    bounds = _note_boundaries(clean)
     starts = sorted({m.start() for pat in pats for m in re.finditer(pat, clean, re.IGNORECASE)})
     best: str | None = None
     for s in starts:
-        nxt = _NOTE_HEADER.search(clean, s + 200)  # the next 'Note N' header ends this note
-        end = min(nxt.start() if nxt else len(clean), s + _FN_MAX)
+        nb = next((b for b in bounds if b > s + 200), None)  # next boundary after this title
+        end = min(nb if nb is not None else len(clean), s + _FN_MAX)
         seg = clean[s:end].strip()
         if _FN_MIN <= len(seg) <= _FN_MAX and (best is None or len(seg) > len(best)):
             best = seg
