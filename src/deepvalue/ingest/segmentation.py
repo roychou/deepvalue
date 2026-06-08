@@ -179,3 +179,67 @@ def extract_mdna(html: str, form: str, *, seg_llm: SegLLM | None = None) -> str 
     """Convenience: just the MD&A text (or None). The drop-in L3 uses in place of the old
     edgar_filings.extract_sections(...).get('mdna')."""
     return segment_mdna(html, form, seg_llm=seg_llm).text
+
+
+# ==========================================
+# FOOTNOTES (for the L4 Footnote Archaeologist)
+# ==========================================
+
+# Topic -> title patterns for the high-value notes the Footnote Archaeologist targets (spec §8.1):
+# disguised debt & hidden liabilities that impair tangible book.
+_FOOTNOTE_TOPICS: dict[str, list[str]] = {
+    "related_party": [r"Related[- ]Part(?:y|ies)\s+Transactions?", r"Transactions?\s+[Ww]ith\s+Related"],
+    "commitments_contingencies": [r"Commitments?\s+and\s+Contingenc", r"\bContingenc"],
+    "leases": [r"\bLeases\b", r"Lease\s+(?:Obligations?|Commitments?)"],
+    "debt": [r"Long[- ]Term\s+Debt", r"Notes?\s+Payable", r"Credit\s+Facilit", r"Borrowings",
+             r"Debt\s+and\s+(?:Credit|Financing)"],
+    "income_taxes": [r"Income\s+Taxes"],
+    "pension": [r"Pension", r"(?:Post)?[Rr]etirement\s+(?:Plans?|Benefits?)", r"Employee\s+Benefit"],
+    "vie": [r"Variable\s+Interest\s+Entit", r"Consolidation\s+of\s+VIE"],
+    "goodwill": [r"Goodwill\s+and\s+(?:Other\s+)?Intangible", r"Goodwill\b"],
+}
+_NOTES_REGION = [r"Notes?\s+to\s+(?:the\s+)?(?:Consolidated\s+)?(?:Financial\s+)?Statements",
+                 r"Item\s*8\.?\b.{0,60}?Financial\s+Statements"]
+_NOTE_HEADER = re.compile(r"(?:Note\s+\d+\b|NOTE\s+\d+\b)", re.IGNORECASE)
+_FN_MIN, _FN_MAX = 300, 14_000
+
+
+def _footnote_region_start(clean: str) -> int:
+    """Offset of the actual notes block — the LAST 'Notes to ... Financial Statements' (the body,
+    not the TOC entry). 0 if not found (then we scan the whole doc)."""
+    starts = _find(clean, _NOTES_REGION)
+    return starts[-1] if starts else 0
+
+
+def extract_footnote(clean_or_html: str, topic: str, *, is_html: bool = True) -> str | None:
+    """Topic-specific footnote text (e.g. 'related_party', 'commitments_contingencies', 'leases',
+    'debt') from a 10-K. Deterministic v1: find the note title in the notes block, capture to the
+    next note header (bounded). Heuristic like the MD&A path — irregular notes are skipped (and the
+    L4 agent simply has less to cite), never mis-bounded."""
+    pats = _FOOTNOTE_TOPICS.get(topic)
+    if not pats:
+        return None
+    clean = clean_text(clean_or_html) if is_html else clean_or_html
+    region0 = _footnote_region_start(clean)
+    region = clean[region0:]
+    title_pos = None
+    for pat in pats:
+        m = re.search(pat, region, re.IGNORECASE)
+        if m:
+            title_pos = m.start() if title_pos is None else min(title_pos, m.start())
+    if title_pos is None:
+        return None
+    start = region0 + title_pos
+    nxt = _NOTE_HEADER.search(clean, start + 200)  # next 'Note N' header ends this note
+    end = min(nxt.start() if nxt else len(clean), start + _FN_MAX)
+    seg = clean[start:end].strip()
+    return seg if len(seg) >= _FN_MIN else None
+
+
+def segment_footnote(html: str, topic: str) -> Section:
+    """Footnote topic -> Section (with sentence IDs for L4 citations)."""
+    text = extract_footnote(html, topic)
+    return Section(f"footnote.{topic}", text, "heuristic" if text else "none", 0.8 if text else 0.0)
+
+
+FOOTNOTE_TOPICS = tuple(_FOOTNOTE_TOPICS)  # the canonical_ids L4 can request: footnote.<topic>

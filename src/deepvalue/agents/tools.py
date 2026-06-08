@@ -42,15 +42,42 @@ async def fetch_xbrl(args: dict) -> dict:
 
 @tool(
     "fetch_section",
-    "Fetch one canonical filing section (e.g. '10-K.item_1a', 'footnote.related_party') with "
-    "sentence IDs, so findings can cite exact locations (canonical_section.sentence_id).",
+    "Fetch one canonical filing section from the latest 10-K filed on/before as_of, WITH sentence "
+    "IDs so findings cite exact locations. canonical_id is '10-K.mdna' or 'footnote.<topic>' where "
+    "topic is one of: related_party, commitments_contingencies, leases, debt, income_taxes, "
+    "pension, vie, goodwill.",
     {"ticker": str, "as_of": str, "canonical_id": str},
 )
 async def fetch_section(args: dict) -> dict:
-    # TODO(L0): wire to ingest/segmentation.py (greenfield) -> FilingSection.sentences.
-    # Until segmentation lands, forensic agents can only reconcile XBRL, not cite prose.
-    return _text(f"SECTION_UNAVAILABLE: ingest/segmentation.py not yet built "
-                 f"(requested {args.get('canonical_id')} for {args['ticker']})")
+    from deepvalue.ingest.edgar import filings_by_cik, ticker_to_cik
+    from deepvalue.ingest.edgar_filings import fetch_filing_document_by_cik
+    from deepvalue.ingest.normalize import to_sentences
+    from deepvalue.ingest.segmentation import FOOTNOTE_TOPICS, segment_footnote, segment_mdna
+
+    cid, ticker, as_of = args["canonical_id"], args["ticker"], args["as_of"]
+    try:
+        cik = ticker_to_cik(ticker)
+        fils = filings_by_cik(cik, forms=("10-K",))
+        f = next((x for x in fils if x["filed"] <= as_of), None)
+        if f is None:
+            return _text(f"no 10-K on/before {as_of} for {ticker}")
+        html = fetch_filing_document_by_cik(cik, f["accession"], f["primary_document"])
+    except Exception as e:  # noqa: BLE001
+        return _text(f"fetch failed for {ticker}: {type(e).__name__}")
+
+    if "mdna" in cid:
+        sec = segment_mdna(html, "10-K")
+    elif cid.startswith("footnote."):
+        sec = segment_footnote(html, cid.split(".", 1)[1])
+    else:
+        return _text(f"unknown canonical_id {cid!r}; use '10-K.mdna' or 'footnote.<topic>' "
+                     f"(topics: {', '.join(FOOTNOTE_TOPICS)})")
+    if not sec.text:
+        return _text(f"SECTION_UNAVAILABLE: {cid} not extractable for {ticker} "
+                     f"(irregular formatting or not present in this filing)")
+    sents = to_sentences(sec.text)
+    body = "\n".join(f"[{s['sentence_id']}] {s['text']}" for s in sents)
+    return _text(f"{cid} from 10-K filed {f['filed']} ({len(sents)} sentences):\n{body}")
 
 
 def deepvalue_tools_server():

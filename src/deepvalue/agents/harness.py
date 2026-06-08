@@ -51,29 +51,44 @@ def build_options() -> ClaudeAgentOptions:
     )
 
 
+class BudgetExceeded(RuntimeError):
+    """A subagent run exceeded its hard --max-llm-usd cap."""
+
+
 async def run_subagent(agent_key: str, user_prompt: str, *, max_llm_usd: float) -> str:
-    """THE core execution primitive (the single scaffold TODO). Dispatch one registered subagent
-    via the Agent SDK and return its final assistant text; callers parse it into §12 contracts.
+    """Run one registered subagent via the Agent SDK and return its final assistant text; callers
+    parse it into §12 contracts. Each subagent runs as a standalone agent (its AgentDefinition
+    prompt as the system prompt) with our data tools + code execution — so we own the L4 fan-out
+    and L5 loop in plain Python (spec §13.3), not via a supervisor's Task delegation.
 
-    Intended implementation (Agent SDK):
-        async with ClaudeSDKClient(options=build_options()) as client:
-            await client.query(user_prompt, agent=agent_key)     # route to the named subagent
-            out, spent = [], 0.0
-            async for msg in client.receive_response():
-                if isinstance(msg, AssistantMessage):
-                    out += [b.text for b in msg.content if isinstance(b, TextBlock)]
-                if isinstance(msg, ResultMessage):
-                    spent += _usd(msg.usage)                      # enforce the hard cap
-                    if spent > max_llm_usd: raise BudgetExceeded(agent_key, spent, max_llm_usd)
-            return "".join(out)
-
-    Spending is gated by CLAUDE.md (ASK FIRST) + the max_llm_usd cap. Until wired, this raises so
-    no agentic run can silently spend.
-    """
-    raise NotImplementedError(
-        f"L4/L5 SDK execution not wired (scaffold): subagent={agent_key!r}. See docstring + spec "
-        "§13.3. Wiring this spends LLM — requires operator go-ahead and a hard --max-llm-usd cap."
+    Spending is gated by CLAUDE.md (ASK FIRST) + the max_llm_usd cap (raises BudgetExceeded)."""
+    from claude_agent_sdk import (
+        AssistantMessage,
+        ClaudeAgentOptions,
+        ResultMessage,
+        TextBlock,
+        query,
     )
+    from deepvalue.agents.tools import deepvalue_tools_server
+
+    agent = SUBAGENTS[agent_key]
+    opts = ClaudeAgentOptions(
+        system_prompt=agent.prompt,
+        model=agent.model,
+        allowed_tools=TOOL_NAMES,
+        mcp_servers={"deepvalue": deepvalue_tools_server()},
+        setting_sources=[],   # pure library run — ignore filesystem CLAUDE.md/settings
+        max_turns=16,
+    )
+    chunks: list[str] = []
+    async for msg in query(prompt=user_prompt, options=opts):
+        if isinstance(msg, AssistantMessage):
+            chunks += [b.text for b in msg.content if isinstance(b, TextBlock)]
+        elif isinstance(msg, ResultMessage):
+            spent = getattr(msg, "total_cost_usd", 0.0) or 0.0
+            if spent > max_llm_usd:
+                raise BudgetExceeded(f"{agent_key}: ${spent:.2f} > cap ${max_llm_usd:.2f}")
+    return "".join(chunks)
 
 
 def _dedupe(findings: list[ForensicFinding]) -> list[ForensicFinding]:
