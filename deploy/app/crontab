@@ -1,0 +1,17 @@
+# supercronic crontab — times are in the container TZ (America/New_York, set in compose) so
+# the schedule is US-market-relative regardless of DST. Fields: min hour dom mon dow.
+#
+# CADENCE (decided): weekly scan + quarterly rebalance. The Tedium Premium is a patient,
+# filing-driven strategy, so the weekly job SCANS the week's new EDGAR filers and refreshes
+# the candidate book + alerts; the actual book is rebalanced on a slower cadence (see below).
+#
+# SAFETY: the weekly job runs in PREVIEW (no --transmit) and FREE (--max-llm-usd 0, the
+# Deterioration Lead isn't wired yet). It logs the orders it WOULD place and emits the
+# recommendation artifact. GO-LIVE is a deliberate edit: add --transmit once you've watched a
+# few previews and are satisfied. Monday 10:00 ET = 30 min after the open (calmer; market open
+# so any future market orders fill).
+0 10 * * 1 cd /app && python -m deepvalue.forward.run --execute ibkr --max-llm-usd 0 >> /app/data/forward/logs/cron.log 2>&1
+
+# Daily watchdog 08:00 ET: alerts (Telegram/email) if the last run is missing/errored/stale
+# (>8 days), so a silently-skipped Monday is caught within a day.
+0 8 * * * cd /app && python -m deepvalue.forward.run --healthcheck >> /app/data/forward/logs/healthcheck.log 2>&1
