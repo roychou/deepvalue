@@ -26,7 +26,7 @@ from pathlib import Path
 
 import yaml
 
-from deepvalue.forward import ibkr_prices
+from deepvalue.forward import ibkr_execution, ibkr_prices, notify
 from deepvalue.forward.universe import cik_to_ticker_map, recent_filers
 from deepvalue.ingest import edgar_fundamentals as ef
 from deepvalue.ingest.edgar import company_sic, is_excluded_sector
@@ -145,12 +145,12 @@ def _write_artifacts(as_of: str, n_universe: int, cands: list[dict], book: list[
         lines.append(f"| {c['rank']} | {c['ticker']} | {c['verdict']} | {c['price']:.2f} | "
                      f"{c['p_tbv']:.2f} | {mos} | {c['f_score']} | {dil} | {','.join(c['flags']) or '—'} |")
     (OUT_DIR / f"recommendation_{as_of}.md").write_text("\n".join(lines) + "\n")
-    (OUT_DIR / "last_run.json").write_text(json.dumps(
-        {"status": "ok", "as_of": as_of, "candidates": len(cands), "buys": n_buy}))
 
 
-async def _run(as_of: str, days_back: int, max_positions: int, p_tbv_max: float,
-               min_f: int, max_llm_usd: float) -> None:
+async def _session(as_of: str, days_back: int, max_positions: int, p_tbv_max: float,
+                   min_f: int, max_llm_usd: float, execute: str, transmit: bool) -> str:
+    """One forward session. Returns a one-line digest. Raises on hard failure (the caller
+    records an error heartbeat + alerts)."""
     adv_floor = POLICY.get("liquidity_floor_adv_usd", 50000)
     # 1) live universe: who filed a 10-K/10-Q recently, resolved to a current ticker
     c2t = cik_to_ticker_map()
@@ -159,27 +159,57 @@ async def _run(as_of: str, days_back: int, max_positions: int, p_tbv_max: float,
     universe = sorted({(c2t[f.cik], f.cik) for f in filers if f.cik in c2t})
     log.info("universe: %d recent filings -> %d priceable tickers", len(filers), len(universe))
     if not universe:
-        log.warning("empty universe; nothing to do"); return
+        log.warning("empty universe; nothing to do")
+        return f"{as_of}: empty universe (no recent filers resolved)"
 
-    # 2) current prices from IBKR (listed-floored), paper-guarded
+    # 2) current prices from IBKR (listed-floored), paper-guarded — connection stays open
+    #    through any execution, then closes.
     ib = await ibkr_prices.connect()
     try:
-        ibkr_prices.assert_paper_ready(ib)
+        acct = ibkr_prices.assert_paper_ready(ib)
         prices = await ibkr_prices.fetch_prices_for(ib, [t for t, _ in universe], lookback_days=400)
+
+        # 3) funnel -> ranked book (free)
+        cands, book = build_book(universe, prices, as_of, max_positions, p_tbv_max, min_f, adv_floor)
+        log.info("screened: %d candidates -> book of %d", len(cands), len(book))
+
+        # 4) MD&A Deterioration Lead — OPT-IN, budget-capped (the spend rule)
+        if max_llm_usd > 0 and book:
+            log.warning("Deterioration Lead requested ($%.0f cap) — not yet wired; screen-only "
+                        "book emitted. (next: current+prior 10-K MD&A -> diff -> materiality)",
+                        max_llm_usd)
+
+        _write_artifacts(as_of, len(universe), cands, book)
+        n_buy = sum(1 for c in book if c["verdict"] == "BUY")
+        digest = (f"{as_of}: {len(cands)} candidates, book {len(book)}, {n_buy} BUY "
+                  f"(acct {acct})")
+
+        # 5) paper rebalance toward the BUY book — preview unless --transmit (opt-in)
+        if execute == "ibkr":
+            buys = [c["ticker"] for c in book if c["verdict"] == "BUY"]
+            last_close = {t: px[max(px)]["close"] for t, px in prices.items() if px}
+            rb = await ibkr_execution.rebalance(
+                ib, buys, last_close, max_positions=max_positions,
+                max_weight=POLICY.get("max_position_weight", 0.06), transmit=transmit)
+            mode = "TRANSMITTED" if transmit else "PREVIEW"
+            log.info("rebalance (%s): %d orders planned", mode, len(rb["plans"]))
+            digest += f" | rebalance {mode}: {len(rb['plans'])} orders"
     finally:
         ib.disconnect()
 
-    # 3) funnel -> ranked book (free)
-    cands, book = build_book(universe, prices, as_of, max_positions, p_tbv_max, min_f, adv_floor)
-    log.info("screened: %d candidates -> book of %d", len(cands), len(book))
-
-    # 4) MD&A Deterioration Lead — OPT-IN, budget-capped (the spend rule)
-    if max_llm_usd > 0 and book:
-        log.warning("Deterioration Lead requested ($%.0f cap) — not yet wired; screen-only book "
-                    "emitted. (next: fetch current+prior 10-K MD&A, diff, score materiality)", max_llm_usd)
-
-    _write_artifacts(as_of, len(universe), cands, book)
     log.info("wrote artifacts to %s (book_%s.json, recommendation_%s.md)", OUT_DIR, as_of, as_of)
+    return digest
+
+
+def _healthcheck(max_age_hours: float = 192.0) -> int:
+    """Watchdog (daily cron): alert + nonzero exit if the weekly clock has gone quiet."""
+    hb = notify.read_heartbeat()
+    if notify.heartbeat_stale(hb, max_age_hours):
+        notify.notify("⚠️ Tedium Premium forward: STALE",
+                      f"last heartbeat: {hb}" if hb else "no heartbeat on record")
+        return 1
+    log.info("healthcheck OK: %s", hb)
+    return 0
 
 
 def main() -> None:
@@ -192,9 +222,27 @@ def main() -> None:
     ap.add_argument("--min-f", type=int, default=5)
     ap.add_argument("--max-llm-usd", type=float, default=0.0,
                     help="enable the Deterioration Lead with this hard cap (0 = free screen only)")
+    ap.add_argument("--execute", choices=["none", "ibkr"], default="none",
+                    help="'ibkr' rebalances the paper account toward the BUY book")
+    ap.add_argument("--transmit", action="store_true",
+                    help="actually send orders (default previews); requires --execute ibkr")
+    ap.add_argument("--healthcheck", action="store_true", help="watchdog mode: alert if stale, exit 1")
     args = ap.parse_args()
-    asyncio.run(_run(args.as_of, args.days_back, args.max_positions, args.p_tbv_max,
-                     args.min_f, args.max_llm_usd))
+
+    if args.healthcheck:
+        raise SystemExit(_healthcheck())
+
+    try:
+        digest = asyncio.run(_session(args.as_of, args.days_back, args.max_positions,
+                                      args.p_tbv_max, args.min_f, args.max_llm_usd,
+                                      args.execute, args.transmit))
+        notify.write_heartbeat("ok", args.as_of, digest)
+        notify.notify(f"✅ Tedium Premium forward OK ({args.as_of})", digest)
+    except Exception as e:  # noqa: BLE001 — record the failure loudly, then re-raise
+        log.exception("forward session FAILED")
+        notify.write_heartbeat("error", args.as_of, f"{type(e).__name__}: {e}")
+        notify.notify(f"❌ Tedium Premium forward FAILED ({args.as_of})", f"{type(e).__name__}: {e}")
+        raise
 
 
 if __name__ == "__main__":
