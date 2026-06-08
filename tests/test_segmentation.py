@@ -47,3 +47,22 @@ def test_segment_mdna_reports_method_and_sentences():
 def test_no_mdna_returns_none_method():
     sec = segment_mdna("<html>nothing relevant here</html>", "10-K")
     assert sec.text is None and sec.method == "none"
+
+
+_NOTES = (
+    "Note 5. Related Party Transactions. " + "The CEO leases a building from a related entity. " * 20
+    + "Note 6. Income Taxes. " + "The deferred tax asset valuation allowance increased. " * 20
+)
+
+
+def test_extract_footnote_finds_topic_bounded_by_next_note():
+    from deepvalue.ingest.segmentation import extract_footnote
+    rp = extract_footnote(_NOTES, "related_party", is_html=False)
+    assert rp is not None and "leases a building from a related entity" in rp
+    assert "Income Taxes" not in rp        # bounded at 'Note 6' — didn't bleed into the next note
+
+
+def test_extract_footnote_unknown_topic_or_absent():
+    from deepvalue.ingest.segmentation import extract_footnote
+    assert extract_footnote(_NOTES, "nonsense_topic", is_html=False) is None
+    assert extract_footnote("no notes here", "debt", is_html=False) is None

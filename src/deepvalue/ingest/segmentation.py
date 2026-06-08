@@ -204,36 +204,25 @@ _NOTE_HEADER = re.compile(r"(?:Note\s+\d+\b|NOTE\s+\d+\b)", re.IGNORECASE)
 _FN_MIN, _FN_MAX = 300, 14_000
 
 
-def _footnote_region_start(clean: str) -> int:
-    """Offset of the actual notes block — the LAST 'Notes to ... Financial Statements' (the body,
-    not the TOC entry). 0 if not found (then we scan the whole doc)."""
-    starts = _find(clean, _NOTES_REGION)
-    return starts[-1] if starts else 0
-
-
 def extract_footnote(clean_or_html: str, topic: str, *, is_html: bool = True) -> str | None:
     """Topic-specific footnote text (e.g. 'related_party', 'commitments_contingencies', 'leases',
-    'debt') from a 10-K. Deterministic v1: find the note title in the notes block, capture to the
-    next note header (bounded). Heuristic like the MD&A path — irregular notes are skipped (and the
-    L4 agent simply has less to cite), never mis-bounded."""
+    'debt') from a 10-K. Heuristic: every title occurrence is captured to its next 'Note N' header
+    (bounded); the LARGEST valid body wins — the real note is substantial, while a TOC entry or a
+    'see Note X' cross-reference is cut short by the very next header. Irregular notes are skipped
+    (the L4 agent just has less to cite), never mis-bounded."""
     pats = _FOOTNOTE_TOPICS.get(topic)
     if not pats:
         return None
     clean = clean_text(clean_or_html) if is_html else clean_or_html
-    region0 = _footnote_region_start(clean)
-    region = clean[region0:]
-    title_pos = None
-    for pat in pats:
-        m = re.search(pat, region, re.IGNORECASE)
-        if m:
-            title_pos = m.start() if title_pos is None else min(title_pos, m.start())
-    if title_pos is None:
-        return None
-    start = region0 + title_pos
-    nxt = _NOTE_HEADER.search(clean, start + 200)  # next 'Note N' header ends this note
-    end = min(nxt.start() if nxt else len(clean), start + _FN_MAX)
-    seg = clean[start:end].strip()
-    return seg if len(seg) >= _FN_MIN else None
+    starts = sorted({m.start() for pat in pats for m in re.finditer(pat, clean, re.IGNORECASE)})
+    best: str | None = None
+    for s in starts:
+        nxt = _NOTE_HEADER.search(clean, s + 200)  # the next 'Note N' header ends this note
+        end = min(nxt.start() if nxt else len(clean), s + _FN_MAX)
+        seg = clean[s:end].strip()
+        if _FN_MIN <= len(seg) <= _FN_MAX and (best is None or len(seg) > len(best)):
+            best = seg
+    return best
 
 
 def segment_footnote(html: str, topic: str) -> Section:
