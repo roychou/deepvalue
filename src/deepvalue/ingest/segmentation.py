@@ -127,9 +127,12 @@ def _llm_locate(clean: str, seg: SegLLM) -> tuple[str | None, float]:
     between them (lean output, no hallucinated content). Returns (mdna_or_none, cost_usd)."""
     from deepvalue.diff.materiality import call_cost_usd
 
+    # Window from the first MD&A cue onward, bounded to keep tokens (and cost) in check. The
+    # deep-tail filings that still fail here (irregular structure) are handled by the caller's
+    # L3-required-for-BUY safety gate, not chased with ever-larger windows.
     starts = _find(clean, _MDNA_STARTS)
     region_start = starts[0] if starts else 0
-    region = clean[region_start: region_start + 140_000]  # from the first MD&A cue; bound tokens
+    region = clean[region_start: region_start + 140_000]
     try:
         resp = seg.client.messages.create(
             model=seg.model, max_tokens=300,
