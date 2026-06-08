@@ -40,4 +40,4 @@ def _prompt(ticker: str, as_of: str, dossier: str) -> str:
 async def synthesize(ticker: str, as_of: str, dossier: str, *, budget) -> str:
     """Run the bull and return the thesis text (the ThesisVerdict.bull_summary seed)."""
     from deepvalue.agents.harness import run_subagent  # lazy — breaks import cycle
-    return await run_subagent(AGENT_KEY, _prompt(ticker, as_of, dossier), budget=budget)
+    return await run_subagent(AGENT_KEY, _prompt(ticker, as_of, dossier), budget=budget, json_only=False)

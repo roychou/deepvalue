@@ -69,22 +69,48 @@ class BudgetMeter:
 
 
 def parse_json(text: str):
-    """Extract a JSON value from a model response that may wrap it in ```json fences or add prose
-    — the agents are told to emit only JSON, but Sonnet occasionally prefaces it."""
+    """Extract a JSON value from a model response that wraps it in prose/markdown (the SDK agents
+    narrate their tool use, then emit the answer). Tries fenced ```json blocks, then bracket-matches
+    the first BALANCED [...] / {...} (greedy regex broke on multi-array / prose-between output)."""
     import json
     import re
 
-    m = re.search(r"```(?:json)?\s*(.*?)```", text, re.S)
-    body = m.group(1) if m else text
-    m2 = re.search(r"(\[.*\]|\{.*\})", body, re.S)  # first array/object
-    return json.loads(m2.group(1) if m2 else body.strip())
+    for m in re.finditer(r"```(?:json)?\s*(.*?)```", text, re.S):  # fenced blocks first
+        try:
+            return json.loads(m.group(1).strip())
+        except Exception:  # noqa: BLE001
+            continue
+    for open_c, close_c in (("[", "]"), ("{", "}")):  # then balanced bracket scan
+        i = text.find(open_c)
+        while i != -1:
+            depth = 0
+            for j in range(i, len(text)):
+                if text[j] == open_c:
+                    depth += 1
+                elif text[j] == close_c:
+                    depth -= 1
+                    if depth == 0:
+                        try:
+                            return json.loads(text[i:j + 1])
+                        except Exception:  # noqa: BLE001
+                            break
+            i = text.find(open_c, i + 1)
+    return json.loads(text)  # last resort — raises if there is truly no JSON
 
 
-async def run_subagent(agent_key: str, user_prompt: str, *, budget: BudgetMeter) -> str:
+_JSON_DIRECTIVE = (
+    "\n\nCRITICAL OUTPUT FORMAT: do all analysis and tool calls FIRST, then make your FINAL "
+    "message contain ONLY the requested JSON — no markdown fences, no commentary, no preamble or "
+    "postscript. The final message must start with '[' or '{' and be valid, parseable JSON.")
+
+
+async def run_subagent(agent_key: str, user_prompt: str, *, budget: BudgetMeter,
+                       json_only: bool = True) -> str:
     """Run one registered subagent via the Agent SDK; return its final assistant text (callers
     parse it into §12 contracts). Drains the SDK stream fully then accounts the cost to the shared
     meter — no mid-stream raise (that broke the SDK generator). Skips (returns '') if the shared
-    budget is already exhausted, so the total cap is hard while individual agents degrade gracefully."""
+    budget is already exhausted. json_only appends a hard final-format directive (off for the bull,
+    which returns free-form thesis prose)."""
     if budget.exhausted():
         log.warning("budget exhausted ($%.2f/$%.2f); skipping %s", budget.spent, budget.cap, agent_key)
         return ""
@@ -108,14 +134,16 @@ async def run_subagent(agent_key: str, user_prompt: str, *, budget: BudgetMeter)
     )
     chunks: list[str] = []
     spent = 0.0
-    async for msg in query(prompt=user_prompt, options=opts):
+    async for msg in query(prompt=user_prompt + (_JSON_DIRECTIVE if json_only else ""), options=opts):
         if isinstance(msg, AssistantMessage):
             chunks += [b.text for b in msg.content if isinstance(b, TextBlock)]
         elif isinstance(msg, ResultMessage):
             spent = getattr(msg, "total_cost_usd", 0.0) or 0.0
+    out = "".join(chunks)
     budget.add(spent)
-    log.info("%s: $%.3f (budget $%.2f/$%.2f)", agent_key, spent, budget.spent, budget.cap)
-    return "".join(chunks)
+    log.info("%s: $%.3f (budget $%.2f/$%.2f); final tail: %s",
+             agent_key, spent, budget.spent, budget.cap, repr(out[-120:]))
+    return out
 
 
 def _dedupe(findings: list[ForensicFinding]) -> list[ForensicFinding]:
