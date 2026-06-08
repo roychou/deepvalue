@@ -15,9 +15,14 @@ import asyncio
 import json
 import logging
 from datetime import date
+from pathlib import Path
 
-from deepvalue.agents import forensic_then_adversarial
-from deepvalue.ingest import edgar_fundamentals as ef
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parents[3] / ".env")  # EDGAR_USER_AGENT for the in-process tools
+
+from deepvalue.agents import forensic_then_adversarial  # noqa: E402
+from deepvalue.ingest import edgar_fundamentals as ef  # noqa: E402
 
 log = logging.getLogger("tedium.deepdive")
 

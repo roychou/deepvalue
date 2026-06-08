@@ -11,6 +11,8 @@ SCAFFOLD: AgentDefinition real; `adjudicate()` parses a ThesisVerdict.
 from __future__ import annotations
 
 import json
+import logging
+from datetime import date
 
 from claude_agent_sdk import AgentDefinition
 
@@ -47,10 +49,26 @@ def _prompt(ticker: str, as_of: str, bull_summary: str, objections: list[Objecti
             f"Mark each sustained/rebutted, then emit one ThesisVerdict. Default PASS.")
 
 
+def _default_pass(ticker: str, as_of: str, bull_summary: str,
+                  objections: list[Objection]) -> ThesisVerdict:
+    """Burry-tilt fallback when the judge's output is unparseable or budget ran out — default
+    PASS, surfacing any non-rebutted objections so a human still sees them."""
+    return ThesisVerdict(
+        ticker=ticker, as_of=date.fromisoformat(as_of), decision="PASS", conviction=0.0,
+        margin_of_safety=0.0, surviving_risks=["judge output unavailable (parse/budget)"],
+        dependencies=[], unresolved_objections=[o for o in objections if o.status != "rebutted"],
+        bull_summary=bull_summary[:2000])
+
+
 async def adjudicate(ticker: str, as_of: str, bull_summary: str, objections: list[Objection], *,
-                     max_llm_usd: float) -> ThesisVerdict:
-    """Run the judge and parse the ThesisVerdict."""
-    from deepvalue.agents.harness import run_subagent  # lazy — breaks import cycle
-    raw = await run_subagent(AGENT_KEY, _prompt(ticker, as_of, bull_summary, objections),
-                             max_llm_usd=max_llm_usd)
-    return ThesisVerdict(**json.loads(raw))
+                     budget) -> ThesisVerdict:
+    """Run the judge and parse the ThesisVerdict; default to PASS if unparseable (Burry tilt)."""
+    from deepvalue.agents.harness import parse_json, run_subagent  # lazy — breaks import cycle
+    raw = await run_subagent(AGENT_KEY, _prompt(ticker, as_of, bull_summary, objections), budget=budget)
+    if not raw.strip():
+        return _default_pass(ticker, as_of, bull_summary, objections)
+    try:
+        return ThesisVerdict(**parse_json(raw))
+    except Exception:  # noqa: BLE001
+        logging.getLogger("tedium.agents").warning("judge: unparseable verdict -> default PASS")
+        return _default_pass(ticker, as_of, bull_summary, objections)

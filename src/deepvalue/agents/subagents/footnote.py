@@ -11,7 +11,7 @@ ForensicFinding[]. The SDK execution lives in harness.run_subagent (the single T
 """
 from __future__ import annotations
 
-import json
+import logging
 
 from claude_agent_sdk import AgentDefinition
 
@@ -48,8 +48,14 @@ def _prompt(ticker: str, as_of: str) -> str:
             f"impair tangible book value. Return ForensicFinding[] (agent='footnote'), each cited.")
 
 
-async def find(ticker: str, as_of: str, *, max_llm_usd: float) -> list[ForensicFinding]:
+async def find(ticker: str, as_of: str, *, budget) -> list[ForensicFinding]:
     """Run the Footnote Archaeologist and parse its structured output into ForensicFinding[]."""
-    from deepvalue.agents.harness import run_subagent  # lazy import — breaks the harness<->subagent cycle
-    raw = await run_subagent(AGENT_KEY, _prompt(ticker, as_of), max_llm_usd=max_llm_usd)
-    return [ForensicFinding(**f) for f in json.loads(raw)]
+    from deepvalue.agents.harness import parse_json, run_subagent  # lazy — breaks import cycle
+    raw = await run_subagent(AGENT_KEY, _prompt(ticker, as_of), budget=budget)
+    if not raw.strip():
+        return []
+    try:
+        return [ForensicFinding(**f) for f in parse_json(raw)]
+    except Exception:  # noqa: BLE001 — a malformed dossier entry can't sink the whole layer
+        logging.getLogger("tedium.agents").warning("footnote: could not parse findings")
+        return []

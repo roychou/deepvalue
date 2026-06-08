@@ -11,7 +11,7 @@ SCAFFOLD: AgentDefinition real; `attack()` parses Objection[].
 """
 from __future__ import annotations
 
-import json
+import logging
 
 from claude_agent_sdk import AgentDefinition
 
@@ -60,9 +60,14 @@ def _prompt(ticker: str, as_of: str, bull_summary: str, dossier: str) -> str:
 
 
 async def attack(ticker: str, as_of: str, bull_summary: str, dossier: str, *,
-                 max_llm_usd: float) -> list[Objection]:
+                 budget) -> list[Objection]:
     """Run the skeptic and parse its typed objections into Objection[]."""
-    from deepvalue.agents.harness import run_subagent  # lazy — breaks import cycle
-    raw = await run_subagent(AGENT_KEY, _prompt(ticker, as_of, bull_summary, dossier),
-                             max_llm_usd=max_llm_usd)
-    return [Objection(**o) for o in json.loads(raw)]
+    from deepvalue.agents.harness import parse_json, run_subagent  # lazy — breaks import cycle
+    raw = await run_subagent(AGENT_KEY, _prompt(ticker, as_of, bull_summary, dossier), budget=budget)
+    if not raw.strip():
+        return []
+    try:
+        return [Objection(**o) for o in parse_json(raw)]
+    except Exception:  # noqa: BLE001 — no parseable objections -> none survive (judge still runs)
+        logging.getLogger("tedium.agents").warning("skeptic: could not parse objections")
+        return []

@@ -51,17 +51,43 @@ def build_options() -> ClaudeAgentOptions:
     )
 
 
-class BudgetExceeded(RuntimeError):
-    """A subagent run exceeded its hard --max-llm-usd cap."""
+class BudgetMeter:
+    """A SHARED running budget across all subagents in one deep-dive. We don't pre-divide the cap
+    into fixed slices (a Sonnet tool-using agent costs ~$0.5-0.6, more than any fair slice) — each
+    subagent runs to completion and adds its real cost; the meter gates whether the NEXT one runs.
+    Soft per-agent, hard total."""
+
+    def __init__(self, cap_usd: float):
+        self.cap = cap_usd
+        self.spent = 0.0
+
+    def exhausted(self) -> bool:
+        return self.spent >= self.cap
+
+    def add(self, usd: float) -> None:
+        self.spent += usd
 
 
-async def run_subagent(agent_key: str, user_prompt: str, *, max_llm_usd: float) -> str:
-    """Run one registered subagent via the Agent SDK and return its final assistant text; callers
-    parse it into §12 contracts. Each subagent runs as a standalone agent (its AgentDefinition
-    prompt as the system prompt) with our data tools + code execution — so we own the L4 fan-out
-    and L5 loop in plain Python (spec §13.3), not via a supervisor's Task delegation.
+def parse_json(text: str):
+    """Extract a JSON value from a model response that may wrap it in ```json fences or add prose
+    — the agents are told to emit only JSON, but Sonnet occasionally prefaces it."""
+    import json
+    import re
 
-    Spending is gated by CLAUDE.md (ASK FIRST) + the max_llm_usd cap (raises BudgetExceeded)."""
+    m = re.search(r"```(?:json)?\s*(.*?)```", text, re.S)
+    body = m.group(1) if m else text
+    m2 = re.search(r"(\[.*\]|\{.*\})", body, re.S)  # first array/object
+    return json.loads(m2.group(1) if m2 else body.strip())
+
+
+async def run_subagent(agent_key: str, user_prompt: str, *, budget: BudgetMeter) -> str:
+    """Run one registered subagent via the Agent SDK; return its final assistant text (callers
+    parse it into §12 contracts). Drains the SDK stream fully then accounts the cost to the shared
+    meter — no mid-stream raise (that broke the SDK generator). Skips (returns '') if the shared
+    budget is already exhausted, so the total cap is hard while individual agents degrade gracefully."""
+    if budget.exhausted():
+        log.warning("budget exhausted ($%.2f/$%.2f); skipping %s", budget.spent, budget.cap, agent_key)
+        return ""
     from claude_agent_sdk import (
         AssistantMessage,
         ClaudeAgentOptions,
@@ -81,13 +107,14 @@ async def run_subagent(agent_key: str, user_prompt: str, *, max_llm_usd: float) 
         max_turns=16,
     )
     chunks: list[str] = []
+    spent = 0.0
     async for msg in query(prompt=user_prompt, options=opts):
         if isinstance(msg, AssistantMessage):
             chunks += [b.text for b in msg.content if isinstance(b, TextBlock)]
         elif isinstance(msg, ResultMessage):
             spent = getattr(msg, "total_cost_usd", 0.0) or 0.0
-            if spent > max_llm_usd:
-                raise BudgetExceeded(f"{agent_key}: ${spent:.2f} > cap ${max_llm_usd:.2f}")
+    budget.add(spent)
+    log.info("%s: $%.3f (budget $%.2f/$%.2f)", agent_key, spent, budget.spent, budget.cap)
     return "".join(chunks)
 
 
@@ -102,14 +129,13 @@ def _dedupe(findings: list[ForensicFinding]) -> list[ForensicFinding]:
     return out
 
 
-async def run_forensic(ticker: str, as_of: str, *, max_llm_usd: float) -> list[ForensicFinding]:
-    """L4 (spec §8): dispatch the 3 forensic specialists IN PARALLEL, flatten + dedupe their
-    findings. Budget split evenly; a failed specialist is logged, not fatal."""
-    per = max_llm_usd / 3.0
+async def run_forensic(ticker: str, as_of: str, *, budget: BudgetMeter) -> list[ForensicFinding]:
+    """L4 (spec §8): dispatch the 3 forensic specialists IN PARALLEL on the shared budget, flatten
+    + dedupe. A specialist that fails (parse/SDK error) is logged, not fatal."""
     results = await asyncio.gather(
-        footnote.find(ticker, as_of, max_llm_usd=per),
-        asset_auditor.find(ticker, as_of, max_llm_usd=per),
-        capital_structure.find(ticker, as_of, max_llm_usd=per),
+        footnote.find(ticker, as_of, budget=budget),
+        asset_auditor.find(ticker, as_of, budget=budget),
+        capital_structure.find(ticker, as_of, budget=budget),
         return_exceptions=True,
     )
     findings: list[ForensicFinding] = []

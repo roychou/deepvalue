@@ -10,7 +10,7 @@ SCAFFOLD: AgentDefinition real; `find()` parses ForensicFinding[]. SDK run = har
 """
 from __future__ import annotations
 
-import json
+import logging
 
 from claude_agent_sdk import AgentDefinition
 
@@ -47,8 +47,14 @@ def _prompt(ticker: str, as_of: str) -> str:
             f"recoverable? Reconcile narrative vs XBRL. Return ForensicFinding[] (agent='asset').")
 
 
-async def find(ticker: str, as_of: str, *, max_llm_usd: float) -> list[ForensicFinding]:
+async def find(ticker: str, as_of: str, *, budget) -> list[ForensicFinding]:
     """Run the Asset Auditor and parse its structured output into ForensicFinding[]."""
-    from deepvalue.agents.harness import run_subagent  # lazy — breaks import cycle
-    raw = await run_subagent(AGENT_KEY, _prompt(ticker, as_of), max_llm_usd=max_llm_usd)
-    return [ForensicFinding(**f) for f in json.loads(raw)]
+    from deepvalue.agents.harness import parse_json, run_subagent  # lazy — breaks import cycle
+    raw = await run_subagent(AGENT_KEY, _prompt(ticker, as_of), budget=budget)
+    if not raw.strip():
+        return []
+    try:
+        return [ForensicFinding(**f) for f in parse_json(raw)]
+    except Exception:  # noqa: BLE001
+        logging.getLogger("tedium.agents").warning("asset: could not parse findings")
+        return []

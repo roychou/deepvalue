@@ -29,8 +29,11 @@ async def forensic_then_adversarial(ticker: str, as_of: str, dossier: str, *,
                                     max_llm_usd: float) -> ThesisVerdict:
     """L4 -> L5 for one BUY-shortlist candidate: run the forensic specialists, fold their findings
     into the dossier, then run the adversarial trap filter. Returns the ThesisVerdict the human
-    signs off on. Budget split 50/50 between the two layers."""
-    findings = await run_forensic(ticker, as_of, max_llm_usd=max_llm_usd * 0.5)
-    full_dossier = dossier + "\n\nFORENSIC FINDINGS:\n" + "\n".join(
-        f.model_dump_json() for f in findings)
-    return await run_adversarial(ticker, as_of, full_dossier, max_llm_usd=max_llm_usd * 0.5)
+    signs off on. A SHARED BudgetMeter spans both layers (hard total cap, graceful per-agent)."""
+    from deepvalue.agents.harness import BudgetMeter
+
+    budget = BudgetMeter(max_llm_usd)
+    findings = await run_forensic(ticker, as_of, budget=budget)
+    summary = "\n".join(f.model_dump_json() for f in findings) or "(no forensic findings)"
+    full_dossier = f"{dossier}\n\nFORENSIC FINDINGS:\n{summary}"
+    return await run_adversarial(ticker, as_of, full_dossier, budget=budget)
