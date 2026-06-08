@@ -148,7 +148,8 @@ def _write_artifacts(as_of: str, n_universe: int, cands: list[dict], book: list[
 
 
 async def _session(as_of: str, days_back: int, max_positions: int, p_tbv_max: float,
-                   min_f: int, max_llm_usd: float, execute: str, transmit: bool) -> str:
+                   min_f: int, max_llm_usd: float, execute: str, transmit: bool,
+                   max_universe: int = 0) -> str:
     """One forward session. Returns a one-line digest. Raises on hard failure (the caller
     records an error heartbeat + alerts)."""
     adv_floor = POLICY.get("liquidity_floor_adv_usd", 50000)
@@ -157,6 +158,8 @@ async def _session(as_of: str, days_back: int, max_positions: int, p_tbv_max: fl
     since = (date.fromisoformat(as_of) - timedelta(days=days_back)).isoformat()
     filers = recent_filers(since, as_of)
     universe = sorted({(c2t[f.cik], f.cik) for f in filers if f.cik in c2t})
+    if max_universe and len(universe) > max_universe:  # IBKR historical-data pacing / cost cap
+        universe = universe[:max_universe]
     log.info("universe: %d recent filings -> %d priceable tickers", len(filers), len(universe))
     if not universe:
         log.warning("empty universe; nothing to do")
@@ -227,6 +230,8 @@ def main() -> None:
     ap.add_argument("--transmit", action="store_true",
                     help="actually send orders (default previews); requires --execute ibkr")
     ap.add_argument("--healthcheck", action="store_true", help="watchdog mode: alert if stale, exit 1")
+    ap.add_argument("--max-universe", type=int, default=0,
+                    help="cap the universe (0 = no cap); respects IBKR historical-data pacing")
     args = ap.parse_args()
 
     if args.healthcheck:
@@ -235,7 +240,7 @@ def main() -> None:
     try:
         digest = asyncio.run(_session(args.as_of, args.days_back, args.max_positions,
                                       args.p_tbv_max, args.min_f, args.max_llm_usd,
-                                      args.execute, args.transmit))
+                                      args.execute, args.transmit, args.max_universe))
         notify.write_heartbeat("ok", args.as_of, digest)
         notify.notify(f"✅ Tedium Premium forward OK ({args.as_of})", digest)
     except Exception as e:  # noqa: BLE001 — record the failure loudly, then re-raise
