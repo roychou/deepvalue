@@ -18,11 +18,8 @@ import logging
 from deepvalue.diff.align import changed_text
 from deepvalue.diff.materiality import MaterialityResult, score_materiality
 from deepvalue.ingest.edgar import filings_by_cik
-from deepvalue.ingest.edgar_filings import (
-    clean_text,
-    extract_sections,
-    fetch_filing_document_by_cik,
-)
+from deepvalue.ingest.edgar_filings import fetch_filing_document_by_cik
+from deepvalue.ingest.segmentation import extract_mdna
 
 log = logging.getLogger("tedium.forward.l3")
 
@@ -33,7 +30,7 @@ def _mdna(cik: str, filing: dict, cache: dict) -> str | None:
     if key not in cache:
         try:
             html = fetch_filing_document_by_cik(cik, filing["accession"], filing["primary_document"])
-            cache[key] = extract_sections(clean_text(html), "10-K").get("mdna")
+            cache[key] = extract_mdna(html, "10-K")  # robust segmenter (over-capture-guarded)
         except Exception as e:  # noqa: BLE001 — a bad fetch drops the name, never the run
             log.warning("MD&A fetch failed (cik=%s acc=%s): %s", cik, key, type(e).__name__)
             cache[key] = None
