@@ -140,7 +140,7 @@ def main() -> None:
     work = _cheap_work(args.per_cohort, args.from_cohort, cikmap)
     cohorts = len({r["cohort"] for r in work})
     log.info("cheap tercile (p_tbv, %s+, cik known): %d names across %d cohorts",
-             len(work), cohorts, args.from_cohort)
+             args.from_cohort, len(work), cohorts)
     if args.count_only:
         n = min(len(work), args.max_pairs)
         print(f"\nWould score {n} names across {cohorts} cohorts "
