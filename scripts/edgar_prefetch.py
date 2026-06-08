@@ -23,6 +23,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
+from dotenv import load_dotenv  # noqa: E402
+load_dotenv(ROOT / ".env")     # EDGAR_USER_AGENT — without this every SEC call hard-fails
 import duckdb  # noqa: E402
 from deepvalue.ingest.edgar import filings_by_cik  # noqa: E402
 from deepvalue.ingest.edgar_filings import FILINGS_DIR, fetch_filing_document_by_cik  # noqa: E402
