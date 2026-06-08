@@ -95,6 +95,27 @@ def screen_one(ticker: str, cik: str, as_of: str, prices: dict,
             "market_cap": vm.get("market_cap")}
 
 
+def fundamental_prefilter(universe: list[tuple[str, str]], as_of: str, min_f: int) -> list[tuple[str, str]]:
+    """Narrow the universe on the FREE, price-independent signals (Piotroski-F, dilution,
+    sector) using only EDGAR — so IBKR prices are fetched for the dozens of survivors, not the
+    hundreds of filers (respects IBKR's ~60-historical-req/10min pacing). Point-in-time."""
+    survivors: list[tuple[str, str]] = []
+    for ticker, cik in universe:
+        p = ef.as_of(ticker, as_of)
+        if p is None or (date.fromisoformat(as_of) - date.fromisoformat(p.filing_date)).days > RECENCY_DAYS:
+            continue
+        ts = trap_signals(p, ef.prior_year(ticker, p), 1.0)  # price=1.0: F & dilution ignore it
+        f, checks, dil = ts.get("f_score"), ts.get("f_checks"), ts.get("dilution_yoy")
+        if (checks or 0) < MIN_F_CHECKS or f is None or f < min_f:
+            continue
+        if dil is not None and not (-0.5 <= dil <= 1.0):
+            continue
+        if is_excluded_sector(company_sic(cik)):
+            continue
+        survivors.append((ticker, cik))
+    return survivors
+
+
 def build_book(universe: list[tuple[str, str]], prices_by_ticker: dict[str, dict], as_of: str,
                max_positions: int, p_tbv_max: float = 2.0, min_f: int = 5,
                adv_floor: float = 50000) -> tuple[list[dict], list[dict]]:
@@ -158,25 +179,33 @@ async def _session(as_of: str, days_back: int, max_positions: int, p_tbv_max: fl
     since = (date.fromisoformat(as_of) - timedelta(days=days_back)).isoformat()
     filers = recent_filers(since, as_of)
     universe = sorted({(c2t[f.cik], f.cik) for f in filers if f.cik in c2t})
-    if max_universe and len(universe) > max_universe:  # IBKR historical-data pacing / cost cap
-        universe = universe[:max_universe]
     log.info("universe: %d recent filings -> %d priceable tickers", len(filers), len(universe))
     if not universe:
         log.warning("empty universe; nothing to do")
         return f"{as_of}: empty universe (no recent filers resolved)"
 
-    # 2) current prices from IBKR (listed-floored), paper-guarded — connection stays open
+    # 2) FUNDAMENTALS-FIRST: narrow on the free EDGAR signals before spending IBKR price
+    #    requests (pacing). Optional cap applies to the survivor set actually priced.
+    survivors = fundamental_prefilter(universe, as_of, min_f)
+    if max_universe and len(survivors) > max_universe:
+        survivors = survivors[:max_universe]
+    log.info("fundamental pre-filter: %d universe -> %d survivors to price", len(universe), len(survivors))
+    if not survivors:
+        _write_artifacts(as_of, len(universe), [], [])
+        return f"{as_of}: {len(universe)} universe, 0 passed fundamentals"
+
+    # 3) current prices from IBKR (listed-floored), paper-guarded — connection stays open
     #    through any execution, then closes.
     ib = await ibkr_prices.connect()
     try:
         acct = ibkr_prices.assert_paper_ready(ib)
-        prices = await ibkr_prices.fetch_prices_for(ib, [t for t, _ in universe], lookback_days=400)
+        prices = await ibkr_prices.fetch_prices_for(ib, [t for t, _ in survivors], lookback_days=400)
 
-        # 3) funnel -> ranked book (free)
-        cands, book = build_book(universe, prices, as_of, max_positions, p_tbv_max, min_f, adv_floor)
+        # 4) funnel -> ranked book (price-dependent gates + composite)
+        cands, book = build_book(survivors, prices, as_of, max_positions, p_tbv_max, min_f, adv_floor)
         log.info("screened: %d candidates -> book of %d", len(cands), len(book))
 
-        # 4) MD&A Deterioration Lead — OPT-IN, budget-capped (the spend rule)
+        # 5) MD&A Deterioration Lead — OPT-IN, budget-capped (the spend rule)
         if max_llm_usd > 0 and book:
             log.warning("Deterioration Lead requested ($%.0f cap) — not yet wired; screen-only "
                         "book emitted. (next: current+prior 10-K MD&A -> diff -> materiality)",
@@ -187,7 +216,7 @@ async def _session(as_of: str, days_back: int, max_positions: int, p_tbv_max: fl
         digest = (f"{as_of}: {len(cands)} candidates, book {len(book)}, {n_buy} BUY "
                   f"(acct {acct})")
 
-        # 5) paper rebalance toward the BUY book — preview unless --transmit (opt-in)
+        # 6) paper rebalance toward the BUY book — preview unless --transmit (opt-in)
         if execute == "ibkr":
             buys = [c["ticker"] for c in book if c["verdict"] == "BUY"]
             last_close = {t: px[max(px)]["close"] for t, px in prices.items() if px}
