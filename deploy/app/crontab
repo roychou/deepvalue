@@ -9,7 +9,7 @@
 # Deterioration Lead under a HARD weekly cap (--max-llm-usd 2) and rebalances toward the BUY book
 # (long-only, policy-weighted; BUY needs L3 clearance via the safety gate). Monday 10:00 ET = 30
 # min after the open so market orders fill. Revert to preview = drop --transmit.
-0 10 * * 1 cd /app && python -m deepvalue.forward.run --execute ibkr --transmit --max-llm-usd 2 >> /app/data/forward/logs/cron.log 2>&1
+0 10 * * 1 cd /app && python -m deepvalue.forward.run --execute ibkr --transmit --max-llm-usd 2 --deepdive-usd 15 >> /app/data/forward/logs/cron.log 2>&1
 
 # Daily watchdog 08:00 ET: alerts (Telegram/email) if the last run is missing/errored/stale
 # (>8 days), so a silently-skipped Monday is caught within a day.

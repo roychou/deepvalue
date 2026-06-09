@@ -174,9 +174,66 @@ def _write_artifacts(as_of: str, n_universe: int, cands: list[dict], book: list[
     (OUT_DIR / f"recommendation_{as_of}.md").write_text("\n".join(lines) + "\n")
 
 
+def _candidate_dossier(c: dict) -> str:
+    """A compact L1+L3 dossier for the L4/L5 agents — why this name is a BUY candidate."""
+    mos = f"{c['margin_of_safety']:.0%}" if c.get("margin_of_safety") is not None else "n/a"
+    ptbv = f"{c['p_tbv']:.2f}" if c.get("p_tbv") is not None else "n/a"
+    return (f"{c['ticker']} — BUY candidate. Price ${c.get('price')}, P/TBV {ptbv}, margin of "
+            f"safety {mos} (discount to conservative asset value), Piotroski-F {c.get('f_score')}, "
+            f"dilution {c.get('dilution')}, EV/EBIT {c.get('ev_ebit')}, MD&A deterioration "
+            f"{c.get('deterioration')}, flags {c.get('flags')}. It passed L1 (cheap on assets + "
+            f"healthy) and L3 (language not deteriorating). Verify the asset base is REAL and "
+            f"recoverable, and find any value-trap risk before a human commits.")
+
+
+def _why(c: dict) -> str:
+    """One-line, plain-language reason for a name's verdict — the 'chain of thought'."""
+    mos, det, flags = c.get("margin_of_safety"), c.get("deterioration"), c.get("flags", [])
+    if c["verdict"] == "BUY":
+        bits = [f"cheap (MoS {mos:.0%})" if mos is not None else "asset-backed", f"F{c['f_score']}",
+                f"clean language (L3 {det})" if det is not None else "clean"]
+        if c.get("l5_decision"):
+            bits.append(f"L5 cleared (conv {c.get('l5_conviction')})")
+        return "BUY — " + ", ".join(bits)
+    reasons = []
+    if (c.get("f_score") or 0) < 7:
+        reasons.append(f"F{c.get('f_score')}<7")
+    if mos is None or mos < 0.40:
+        reasons.append(f"MoS {mos:.0%}<40%" if mos is not None else "no asset discount")
+    if "DETERIORATING" in flags:
+        reasons.append(f"MD&A DETERIORATING (L3 {det})")
+    if "DISTRESS" in flags:
+        reasons.append("Altman DISTRESS")
+    if "LOW_RUNWAY" in flags:
+        reasons.append("low cash runway")
+    if "NO_L3_READ" in flags:
+        reasons.append("MD&A unreadable -> not cleared")
+    if "L5_KILL" in flags:
+        reasons.append(f"L5 trap-filter killed: {(c.get('l5_risks') or ['trap'])[0]}")
+    return "WATCH — " + ("; ".join(reasons) if reasons else "did not clear all BUY gates")
+
+
+def _reasoning_digest(as_of: str, n_universe: int, cands: list[dict], book: list[dict],
+                      acct: str) -> str:
+    """A richer, explanatory alert body — what the screen did and WHY each name landed where it
+    did (chain-of-thought), so the ping explains the decision, not just the count."""
+    n_buy = sum(1 for c in book if c["verdict"] == "BUY")
+    lines = [f"Tedium Premium — {as_of} (acct {acct})",
+             f"{n_universe} recent EDGAR filers -> {len(cands)} screenable -> book {len(book)}, "
+             f"{n_buy} BUY."]
+    if not book:
+        lines.append("No name cleared the screen (cheap-on-assets + healthy + liquid).")
+        return "\n".join(lines)
+    lines.append("BUY bar: F>=7, margin-of-safety>=40%, no risk flags, L3 language not deteriorating"
+                 + (", L5 trap-filter cleared." if any(c.get("l5_decision") for c in book) else "."))
+    for c in sorted(book, key=lambda x: x.get("composite", 0), reverse=True):
+        lines.append(f"- {c['ticker']} @ ${c.get('price')}: {_why(c)}")
+    return "\n".join(lines)
+
+
 async def _session(as_of: str, days_back: int, max_positions: int, p_tbv_max: float,
                    min_f: int, max_llm_usd: float, execute: str, transmit: bool,
-                   max_universe: int = 0) -> str:
+                   max_universe: int = 0, deepdive_usd: float = 0.0) -> str:
     """One forward session. Returns a one-line digest. Raises on hard failure (the caller
     records an error heartbeat + alerts)."""
     adv_floor = POLICY.get("liquidity_floor_adv_usd", 50000)
@@ -249,10 +306,33 @@ async def _session(as_of: str, days_back: int, max_positions: int, p_tbv_max: fl
                      len(det), len(book), spent, n_blocked)
             l3_note = f" | L3 {len(det)}/{len(book)} (${spent:.2f})"
 
+        # 6) L4 forensic + L5 adversarial trap filter on the BUY shortlist (opt-in, capped).
+        #    Spec gate: a clean screen alone never triggers BUY — L5 must clear. Runs only on BUYs
+        #    (rare), fast in the deployed container (the SDK only stalls when nested in a CLI).
+        if deepdive_usd > 0:
+            buys0 = [c for c in book if c["verdict"] == "BUY"]
+            if buys0:
+                from deepvalue.agents import forensic_then_adversarial
+                per, killed = deepdive_usd / len(buys0), 0
+                for c in buys0:
+                    try:
+                        v = await forensic_then_adversarial(c["ticker"], as_of,
+                                                            _candidate_dossier(c), max_llm_usd=per)
+                    except Exception as e:  # noqa: BLE001 — an agent failure can't sink the run
+                        log.warning("L4/L5 failed for %s: %s", c["ticker"], type(e).__name__)
+                        continue
+                    c["l5_decision"] = v.decision
+                    c["l5_conviction"] = round(v.conviction, 2)
+                    c["l5_risks"] = v.surviving_risks[:4]
+                    if v.decision != "BUY":  # the trap filter held/killed it
+                        c["verdict"] = "WATCH"
+                        if "L5_KILL" not in c["flags"]:
+                            c["flags"].append("L5_KILL")
+                        killed += 1
+                log.info("L4/L5: vetted %d BUYs, %d killed by the trap filter", len(buys0), killed)
+
         _write_artifacts(as_of, len(universe), cands, book)
-        n_buy = sum(1 for c in book if c["verdict"] == "BUY")
-        digest = (f"{as_of}: {len(cands)} candidates, book {len(book)}, {n_buy} BUY "
-                  f"(acct {acct}){l3_note}")
+        digest = _reasoning_digest(as_of, len(universe), cands, book, acct) + l3_note
 
         # 6) paper rebalance toward the BUY book — preview unless --transmit (opt-in)
         if execute == "ibkr":
@@ -299,6 +379,9 @@ def main() -> None:
     ap.add_argument("--healthcheck", action="store_true", help="watchdog mode: alert if stale, exit 1")
     ap.add_argument("--max-universe", type=int, default=0,
                     help="cap the universe (0 = no cap); respects IBKR historical-data pacing")
+    ap.add_argument("--deepdive-usd", type=float, default=0.0,
+                    help="enable the L4/L5 forensic+adversarial trap filter on BUY candidates with "
+                         "this hard cap split across them (0 = off). Only runs when there are BUYs.")
     args = ap.parse_args()
 
     if args.healthcheck:
@@ -307,7 +390,8 @@ def main() -> None:
     try:
         digest = asyncio.run(_session(args.as_of, args.days_back, args.max_positions,
                                       args.p_tbv_max, args.min_f, args.max_llm_usd,
-                                      args.execute, args.transmit, args.max_universe))
+                                      args.execute, args.transmit, args.max_universe,
+                                      args.deepdive_usd))
         notify.write_heartbeat("ok", args.as_of, digest)
         notify.notify(f"✅ Tedium Premium forward OK ({args.as_of})", digest)
     except Exception as e:  # noqa: BLE001 — record the failure loudly, then re-raise
