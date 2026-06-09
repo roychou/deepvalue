@@ -26,6 +26,8 @@ from deepvalue.contracts.models import ForensicFinding, Objection, ThesisVerdict
 
 log = logging.getLogger("tedium.agents")
 
+SUBAGENT_TIMEOUT_S = 300  # hard per-agent wall-clock cap (the bundled SDK CLI can stall for hours)
+
 
 # --- tolerant coercion: the SDK agents emit valid JSON but with their OWN field names + rich
 # nested content; these map whatever they produce into the §12 contracts, defaulting unknowns and
@@ -184,13 +186,25 @@ async def run_subagent(agent_key: str, user_prompt: str, *, budget: BudgetMeter,
         setting_sources=[],   # pure library run — ignore filesystem CLAUDE.md/settings
         max_turns=16,
     )
-    chunks: list[str] = []
-    spent = 0.0
-    async for msg in query(prompt=user_prompt + (_JSON_DIRECTIVE if json_only else ""), options=opts):
-        if isinstance(msg, AssistantMessage):
-            chunks += [b.text for b in msg.content if isinstance(b, TextBlock)]
-        elif isinstance(msg, ResultMessage):
-            spent = getattr(msg, "total_cost_usd", 0.0) or 0.0
+
+    async def _drain() -> tuple[list[str], float]:
+        chunks: list[str] = []
+        spent = 0.0
+        async for msg in query(prompt=user_prompt + (_JSON_DIRECTIVE if json_only else ""),
+                               options=opts):
+            if isinstance(msg, AssistantMessage):
+                chunks += [b.text for b in msg.content if isinstance(b, TextBlock)]
+            elif isinstance(msg, ResultMessage):
+                spent = getattr(msg, "total_cost_usd", 0.0) or 0.0
+        return chunks, spent
+
+    # Hard per-agent wall-clock cap: the bundled SDK CLI can stall for HOURS here (0% CPU,
+    # waiting). A timeout fails the agent fast (-> graceful empty) instead of hanging the run.
+    try:
+        chunks, spent = await asyncio.wait_for(_drain(), timeout=SUBAGENT_TIMEOUT_S)
+    except (TimeoutError, asyncio.TimeoutError):
+        log.warning("%s timed out after %ds -> empty", agent_key, SUBAGENT_TIMEOUT_S)
+        return ""
     out = "".join(chunks)
     budget.add(spent)
     log.info("%s: $%.3f (budget $%.2f/$%.2f); final tail: %s",
