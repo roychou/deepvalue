@@ -1,0 +1,58 @@
+# Tedium Premium forward-clock deployment (replaces parley on the same box).
+#
+#   gateway : hand-rolled IB Gateway + IBC (paper), headless. Holds the broker session.
+#             (Generic image copied from parley — same DU paper account, reused + reset.)
+#   app     : the Tedium Premium scheduler (supercronic) — weekly forward session + daily
+#             watchdog. Connects to `gateway` over the private compose network.
+#
+# Private network only: the Gateway API is never published to the host/internet (`expose`,
+# not `ports:`). Secrets come from deploy/.env (gitignored) -> Doppler at runtime. State
+# persists on named volumes — back up the `forward` volume (the live track record).
+#
+# Quick start (from deploy/):
+#   cp .env.example .env && $EDITOR .env        # the Doppler service token (reuse parley's)
+#   docker compose build
+#   docker compose up -d
+#   docker compose logs -f gateway              # watch the IBC login succeed
+#   # preview a session by hand:
+#   docker compose run --rm app python -m deepvalue.forward.run --execute ibkr
+name: tediumpremium
+
+services:
+  gateway:
+    build:
+      context: ./gateway
+    image: tediumpremium-gateway:local
+    environment:
+      DOPPLER_TOKEN: ${DOPPLER_TOKEN:?set DOPPLER_TOKEN in deploy/.env}
+      TRADING_MODE: paper          # the image refuses anything but paper
+      API_PORT_RELAY: "4004"
+      TZ: ${TZ:-America/New_York}
+    expose:
+      - "4004"                     # internal network only — never add a host `ports:` map
+    volumes:
+      - gateway_settings:/root/Jts # persist jts.ini (API + auto-restart) & IBC state
+    restart: unless-stopped
+
+  app:
+    build:
+      context: ..                  # repo root: needs src/ + config/ + pyproject.toml + uv.lock
+      dockerfile: deploy/app/Dockerfile
+    image: tediumpremium-app:local
+    environment:
+      DOPPLER_TOKEN: ${DOPPLER_TOKEN:?set DOPPLER_TOKEN in deploy/.env}
+      IBKR_HOST: gateway           # the gateway service on the compose network
+      IBKR_PORT: "4004"            # the socat relay port
+      TZ: ${TZ:-America/New_York}
+    volumes:
+      - forward:/app/data/forward  # the live forward track record — back this volume up
+      - cache:/app/data/cache      # self-warming EDGAR / price caches
+    depends_on:
+      gateway:
+        condition: service_healthy # wait for Gateway to be logged in + API live
+    restart: unless-stopped
+
+volumes:
+  gateway_settings:
+  forward:
+  cache:

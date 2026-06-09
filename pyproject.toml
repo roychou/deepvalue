@@ -12,6 +12,7 @@ dependencies = [
     "pandas>=2.0",             # quant metrics, alignment
     "python-dotenv>=1.0",
     "duckdb>=1.5.3",
+    "ib-async>=2.1.0",         # forward path: IBKR daily-bar prices + paper execution
 ]
 
 [project.optional-dependencies]
