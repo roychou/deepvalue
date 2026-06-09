@@ -49,15 +49,26 @@ def _prompt(ticker: str, as_of: str, bull_summary: str, objections: list[Objecti
             f"Mark each sustained/rebutted, then emit one ThesisVerdict. Default PASS.")
 
 
-def _default_pass(ticker: str, as_of: str, bull_summary: str,
-                  objections: list[Objection]) -> ThesisVerdict:
-    """Burry-tilt fallback when the judge's output is unparseable or budget ran out — default
-    PASS, surfacing any non-rebutted objections so a human still sees them."""
+NEEDS_REVIEW = "NEEDS_HUMAN_REVIEW"
+
+
+def needs_review(v: ThesisVerdict) -> bool:
+    """True if this verdict is a judge-failure escalation (not a clean adjudication)."""
+    return bool(v.surviving_risks) and str(v.surviving_risks[0]).startswith(NEEDS_REVIEW)
+
+
+def _review_required(ticker: str, as_of: str, bull_summary: str, objections: list[Objection],
+                     reason: str) -> ThesisVerdict:
+    """When the judge can't cleanly render, do NOT silently PASS (that reads as a clean reject).
+    Escalate: decision=WATCH (held, not bought, not rejected) + a NEEDS_HUMAN_REVIEW marker, so a
+    human adjudicates. The non-rebutted objections are surfaced so they have the evidence."""
+    open_objs = [o for o in objections if o.status != "rebutted"]
     return ThesisVerdict(
-        ticker=ticker, as_of=date.fromisoformat(as_of), decision="PASS", conviction=0.0,
-        margin_of_safety=0.0, surviving_risks=["judge output unavailable (parse/budget)"],
-        dependencies=[], unresolved_objections=[o for o in objections if o.status != "rebutted"],
-        bull_summary=bull_summary[:2000])
+        ticker=ticker, as_of=date.fromisoformat(as_of), decision="WATCH", conviction=0.0,
+        margin_of_safety=0.0,
+        surviving_risks=[f"{NEEDS_REVIEW}: judge failed to render a verdict ({reason})"]
+        + [o.claim[:200] for o in open_objs][:4],
+        dependencies=[], unresolved_objections=open_objs, bull_summary=bull_summary[:2000])
 
 
 async def adjudicate(ticker: str, as_of: str, bull_summary: str, objections: list[Objection], *,
@@ -69,7 +80,7 @@ async def adjudicate(ticker: str, as_of: str, bull_summary: str, objections: lis
     raw = await run_subagent(AGENT_KEY, _prompt(ticker, as_of, bull_summary, objections),
                              budget=budget, force=True)
     if not raw.strip():
-        return _default_pass(ticker, as_of, bull_summary, objections)
+        return _review_required(ticker, as_of, bull_summary, objections, "no output / budget")
     try:
         d = parse_json(raw)
         if not isinstance(d, dict):
@@ -88,5 +99,5 @@ async def adjudicate(ticker: str, as_of: str, bull_summary: str, objections: lis
             unresolved_objections=[o for o in objections if o.status != "rebutted"],
             bull_summary=bull_summary[:2000])
     except Exception:  # noqa: BLE001
-        logging.getLogger("tedium.agents").warning("judge: unusable verdict -> default PASS")
-        return _default_pass(ticker, as_of, bull_summary, objections)
+        logging.getLogger("tedium.agents").warning("judge: unusable verdict -> HUMAN REVIEW")
+        return _review_required(ticker, as_of, bull_summary, objections, "unparseable verdict")

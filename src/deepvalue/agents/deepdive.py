@@ -46,11 +46,17 @@ def _dossier(ticker: str, as_of: str) -> str:
             f"surface any value-trap risk before a human commits.")
 
 
-async def _run(ticker: str, as_of: str, cap: float) -> None:
+async def _run(ticker: str, as_of: str, cap: float) -> int:
     log.info("L4->L5 deep-dive: %s as of %s (cap $%.2f)", ticker, as_of, cap)
     verdict = await forensic_then_adversarial(ticker, as_of, _dossier(ticker, as_of), max_llm_usd=cap)
     print("\n===== ThesisVerdict =====")
     print(verdict.model_dump_json(indent=2))
+    from deepvalue.agents.subagents.judge import needs_review
+    if needs_review(verdict):  # raise for human intervention — judge could not adjudicate
+        print("\n⚠️  HUMAN REVIEW REQUIRED: the judge could not render a clean verdict. Held at "
+              "WATCH (not PASS) — review the surviving objections above and decide by hand.")
+        return 2
+    return 0
 
 
 def main() -> None:
@@ -60,7 +66,7 @@ def main() -> None:
     ap.add_argument("--as-of", default=date.today().isoformat())
     ap.add_argument("--max-llm-usd", type=float, required=True, help="hard spend cap")
     a = ap.parse_args()
-    asyncio.run(_run(a.ticker.upper(), a.as_of, a.max_llm_usd))
+    raise SystemExit(asyncio.run(_run(a.ticker.upper(), a.as_of, a.max_llm_usd)))
 
 
 if __name__ == "__main__":

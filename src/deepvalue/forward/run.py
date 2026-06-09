@@ -313,25 +313,41 @@ async def _session(as_of: str, days_back: int, max_positions: int, p_tbv_max: fl
             buys0 = [c for c in book if c["verdict"] == "BUY"]
             if buys0:
                 from deepvalue.agents import forensic_then_adversarial
+                from deepvalue.agents.subagents.judge import needs_review
                 # split the budget across BUYs, but cap any single name (a lively debate can
                 # otherwise consume the whole pot — AMS hit ~$8 on its own).
-                per, killed = min(deepdive_usd / len(buys0), 8.0), 0
+                per, killed, review = min(deepdive_usd / len(buys0), 8.0), 0, []
                 for c in buys0:
                     try:
                         v = await forensic_then_adversarial(c["ticker"], as_of,
                                                             _candidate_dossier(c), max_llm_usd=per)
-                    except Exception as e:  # noqa: BLE001 — an agent failure can't sink the run
-                        log.warning("L4/L5 failed for %s: %s", c["ticker"], type(e).__name__)
+                    except Exception as e:  # noqa: BLE001 — an agent failure escalates, not silently passes
+                        log.warning("L4/L5 errored for %s: %s -> human review", c["ticker"], type(e).__name__)
+                        c["verdict"] = "WATCH"
+                        if "NEEDS_REVIEW" not in c["flags"]:
+                            c["flags"].append("NEEDS_REVIEW")
+                        review.append(c["ticker"])
                         continue
                     c["l5_decision"] = v.decision
                     c["l5_conviction"] = round(v.conviction, 2)
                     c["l5_risks"] = v.surviving_risks[:4]
-                    if v.decision != "BUY":  # the trap filter held/killed it
+                    if needs_review(v):  # judge couldn't render -> hold for a human, do NOT pass
+                        c["verdict"] = "WATCH"
+                        if "NEEDS_REVIEW" not in c["flags"]:
+                            c["flags"].append("NEEDS_REVIEW")
+                        review.append(c["ticker"])
+                    elif v.decision != "BUY":  # the trap filter held/killed it
                         c["verdict"] = "WATCH"
                         if "L5_KILL" not in c["flags"]:
                             c["flags"].append("L5_KILL")
                         killed += 1
-                log.info("L4/L5: vetted %d BUYs, %d killed by the trap filter", len(buys0), killed)
+                log.info("L4/L5: vetted %d BUYs, %d killed, %d need review", len(buys0), killed, len(review))
+                if review:  # raise for human intervention — a failed adjudication must be LOUD
+                    notify.notify(
+                        f"⚠️ HUMAN REVIEW REQUIRED — Tedium Premium {as_of}",
+                        f"The L5 trap filter could NOT render a verdict for BUY candidate(s): "
+                        f"{', '.join(review)}. They are HELD at WATCH (not bought, not auto-passed) "
+                        f"pending manual review — re-run the deepdive or vet by hand before any buy.")
 
         _write_artifacts(as_of, len(universe), cands, book)
         digest = _reasoning_digest(as_of, len(universe), cands, book, acct) + l3_note
