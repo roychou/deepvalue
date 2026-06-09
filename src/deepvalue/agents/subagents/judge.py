@@ -65,7 +65,9 @@ async def adjudicate(ticker: str, as_of: str, bull_summary: str, objections: lis
     """Run the judge and coerce its JSON into a ThesisVerdict; default to PASS if unusable (Burry
     tilt). Tolerant of the agent's own field names — captures its real decision + surviving risks."""
     from deepvalue.agents.harness import _f01, _num, _strs, parse_json, run_subagent  # lazy
-    raw = await run_subagent(AGENT_KEY, _prompt(ticker, as_of, bull_summary, objections), budget=budget)
+    # force=True: the judge MUST render even if the debate spent the budget (it starved on AMS).
+    raw = await run_subagent(AGENT_KEY, _prompt(ticker, as_of, bull_summary, objections),
+                             budget=budget, force=True)
     if not raw.strip():
         return _default_pass(ticker, as_of, bull_summary, objections)
     try:

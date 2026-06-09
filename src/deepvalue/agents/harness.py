@@ -159,13 +159,13 @@ _JSON_DIRECTIVE = (
 
 
 async def run_subagent(agent_key: str, user_prompt: str, *, budget: BudgetMeter,
-                       json_only: bool = True) -> str:
+                       json_only: bool = True, force: bool = False) -> str:
     """Run one registered subagent via the Agent SDK; return its final assistant text (callers
     parse it into §12 contracts). Drains the SDK stream fully then accounts the cost to the shared
     meter — no mid-stream raise (that broke the SDK generator). Skips (returns '') if the shared
-    budget is already exhausted. json_only appends a hard final-format directive (off for the bull,
-    which returns free-form thesis prose)."""
-    if budget.exhausted():
+    budget is already exhausted, UNLESS force=True (the judge must always render the verdict, even
+    if a lively debate spent the pot). json_only appends a hard final-format directive."""
+    if budget.exhausted() and not force:
         log.warning("budget exhausted ($%.2f/$%.2f); skipping %s", budget.spent, budget.cap, agent_key)
         return ""
     from claude_agent_sdk import (
