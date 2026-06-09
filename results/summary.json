@@ -1,0 +1,110 @@
+[
+  {
+    "test": "l3_all_cheap",
+    "horizon_days": 63,
+    "mean_ic": 0.0285,
+    "t_stat_naive": 0.79,
+    "n_cohorts": 24,
+    "total_obs": 1506,
+    "overlap_warning": false
+  },
+  {
+    "test": "l3_event_clean",
+    "horizon_days": 63,
+    "mean_ic": 0.113,
+    "t_stat_naive": 2.15,
+    "n_cohorts": 24,
+    "total_obs": 896,
+    "overlap_warning": false
+  },
+  {
+    "test": "l3_all_cheap",
+    "horizon_days": 126,
+    "mean_ic": 0.0955,
+    "t_stat_naive": 2.09,
+    "n_cohorts": 24,
+    "total_obs": 1506,
+    "overlap_warning": false
+  },
+  {
+    "test": "l3_event_clean",
+    "horizon_days": 126,
+    "mean_ic": 0.1408,
+    "t_stat_naive": 2.63,
+    "n_cohorts": 24,
+    "total_obs": 896,
+    "overlap_warning": false
+  },
+  {
+    "test": "l3_all_cheap",
+    "horizon_days": 252,
+    "mean_ic": 0.0944,
+    "t_stat_naive": 1.81,
+    "n_cohorts": 24,
+    "total_obs": 1506,
+    "overlap_warning": false
+  },
+  {
+    "test": "l3_event_clean",
+    "horizon_days": 252,
+    "mean_ic": 0.0918,
+    "t_stat_naive": 1.61,
+    "n_cohorts": 24,
+    "total_obs": 896,
+    "overlap_warning": false
+  },
+  {
+    "test": "anonymization_original",
+    "horizon_days": 63,
+    "mean_ic": 0.1054,
+    "t_stat_naive": 2.1,
+    "n_cohorts": 11,
+    "total_obs": 800,
+    "overlap_warning": false
+  },
+  {
+    "test": "anonymization_anonymized",
+    "horizon_days": 63,
+    "mean_ic": 0.091,
+    "t_stat_naive": 1.97,
+    "n_cohorts": 11,
+    "total_obs": 800,
+    "overlap_warning": false
+  },
+  {
+    "test": "anonymization_original",
+    "horizon_days": 126,
+    "mean_ic": 0.1248,
+    "t_stat_naive": 2.74,
+    "n_cohorts": 11,
+    "total_obs": 800,
+    "overlap_warning": false
+  },
+  {
+    "test": "anonymization_anonymized",
+    "horizon_days": 126,
+    "mean_ic": 0.1162,
+    "t_stat_naive": 2.6,
+    "n_cohorts": 11,
+    "total_obs": 800,
+    "overlap_warning": false
+  },
+  {
+    "test": "anonymization_original",
+    "horizon_days": 252,
+    "mean_ic": 0.111,
+    "t_stat_naive": 2.46,
+    "n_cohorts": 11,
+    "total_obs": 800,
+    "overlap_warning": false
+  },
+  {
+    "test": "anonymization_anonymized",
+    "horizon_days": 252,
+    "mean_ic": 0.0977,
+    "t_stat_naive": 2.38,
+    "n_cohorts": 11,
+    "total_obs": 800,
+    "overlap_warning": false
+  }
+]
