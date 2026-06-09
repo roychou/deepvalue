@@ -313,7 +313,9 @@ async def _session(as_of: str, days_back: int, max_positions: int, p_tbv_max: fl
             buys0 = [c for c in book if c["verdict"] == "BUY"]
             if buys0:
                 from deepvalue.agents import forensic_then_adversarial
-                per, killed = deepdive_usd / len(buys0), 0
+                # split the budget across BUYs, but cap any single name (a lively debate can
+                # otherwise consume the whole pot — AMS hit ~$8 on its own).
+                per, killed = min(deepdive_usd / len(buys0), 8.0), 0
                 for c in buys0:
                     try:
                         v = await forensic_then_adversarial(c["ticker"], as_of,
