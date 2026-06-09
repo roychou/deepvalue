@@ -14,3 +14,8 @@
 # Daily watchdog 08:00 ET: alerts (Telegram/email) if the last run is missing/errored/stale
 # (>8 days), so a silently-skipped Monday is caught within a day.
 0 8 * * * cd /app && python -m deepvalue.forward.run --healthcheck >> /app/data/forward/logs/healthcheck.log 2>&1
+
+# L7 calibration / DECAY ALARM — 1st of the month 12:00 ET. Scores the accumulated weekly books
+# against forward returns OUT-OF-SAMPLE (no LLM spend) and alerts whether the L3 edge still holds.
+# Says "rig still young" until enough forward time matures — correct for the first several months.
+0 12 1 * * cd /app && python -m deepvalue.calibration.run >> /app/data/forward/logs/calibration.log 2>&1
