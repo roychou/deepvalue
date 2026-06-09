@@ -22,6 +22,21 @@ Full design: `notes/deep-value-system-design.md` (carried over from the parley r
 | **L5 adversarial** | **secondary** — value-trap rejection |
 | L7 calibration | enabling — proves it works / detects edge decay |
 
+**Reproducible validation (don't take the numbers on trust).** The L3 headline lives in
+[`results/`](results/) as committed per-cohort IC tables — *our computed statistics, not licensed
+vendor data* — so you can clone, open the CSV, and re-derive the mean and t yourself (the same
+standard parley meets for its committed null). Leading indicator: **IC +0.113 (t 2.15) @63d,
++0.141 (t 2.63) @126d** among event-clean names; survives name/ticker anonymization
+(+0.125 → +0.116 @126d). Modest, survivorship-free, point-in-time — `results/README.md` states the
+caveats. Regenerate: `uv run python scripts/regenerate_results.py`.
+
+**L4/L5 status — engineering, not (yet) a validated analytical capability.** The Agent-SDK
+forensic (L4) and adversarial trap-filter (L5) layers are *built and run end-to-end* — per-name
+budget caps, wall-clock timeouts, tolerant contract coercion, and human-escalation when the judge
+can't render (it holds at `WATCH` + alerts, never a silent `PASS`). But *running to completion is
+not producing good verdicts*: there is **no committed, validated verdict**, which is why the table
+rates them partial/secondary. Claim them as engineering. The validated edge is **L3**.
+
 ## Layers (1:1 with `src/deepvalue/`)
 L0 ingest+segmentation · L1 quant gate · L2 triage+cache · L3 diff (EDGE) · L4 forensic
 subagents · L5 adversarial loop · L6 sizing policy · L7 calibration. Orchestration is

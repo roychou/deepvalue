@@ -1,9 +1,17 @@
 # What deepvalue set out to validate — and what it actually validated
 
 *A plain-language record of the Phase-1/2 validation (June 2026). Written to be readable by
-a non-specialist. Numbers are survivorship-free, point-in-time, mostly over ~28 annual
-cohorts (1999–2026 via Sharadar). Total cost of the validation: ~$54 of LLM usage + one
-month of a Sharadar data subscription.*
+a non-specialist. Numbers are survivorship-free, point-in-time, over Sharadar's 1998–2026 span.
+Cohort counts differ by test (this is the "28 vs 10" reconciliation): the headline
+**leading-indicator panel is 24 annual cohorts (2002–2025)**; the **anonymization pilot is 11
+cohorts (2015+)**; the **F-score-control test (point 5) ran on the earlier ~10-cohort FMP-era
+subset** before we bought Sharadar. Total cost of the validation: ~$54 of LLM usage + one month
+of a Sharadar data subscription.*
+
+> **The positive numbers below are committed and re-derivable.** The L3 leading-indicator and
+> anonymization ICs live in [`results/`](../results/) as per-cohort CSVs (our computed statistics,
+> not licensed vendor rows) — clone the repo, open the CSV, re-derive the mean and t yourself.
+> Regenerate with `uv run python scripts/regenerate_results.py`. Do not take these on trust.
 
 ---
 
@@ -76,10 +84,12 @@ trained through early 2026; scoring a 2015 filing from a company that later went
 might score "bad" from *memory*, not from *reading*. That fakery is what killed the predecessor.
 Test: **anonymize** the filings (strip company name/ticker/entities → "the Company") and
 re-score. If the AI were recognizing companies, hiding identity would gut the signal. **Result:
-IC barely moved (+0.135 → +0.127).** It *survived* → the signal is genuine reading of the risk
-language, not recalled outcomes. (This is the result that separates deepvalue from the
-disproven approach. Caveat: anonymization is imperfect, but removing the obvious handles barely
-dented it.)
+the IC barely moved** — original → anonymized was **+0.125 → +0.116 at 6 months (retains ~93%)**,
++0.105 → +0.091 at 3 months, +0.111 → +0.098 at 12 months ([`results/l3_anonymization_ic.csv`](../results/l3_anonymization_ic.csv)).
+It *survived* → the signal is genuine reading of the risk language, not recalled outcomes. (This
+is the result that separates deepvalue from the disproven approach. Caveats: anonymization is
+imperfect; the pilot is **only 800 names across 11 cohorts (2015+), underpowered** — treat it as
+suggestive, not settled.)
 
 **4. The edge lives in the neglected illiquid names — exactly as claimed.** Split by liquidity:
 deterioration signal **strongest in the illiquid bucket** (IC +0.13, t≈3.5), **~zero in the
@@ -87,8 +97,9 @@ liquid bucket.** (The dumb version did *not* show this — so it's specifically 
 signal that lives in the ignored corner.)
 
 **5. Does it add over the FREE signals? — nuanced.** Inside the cheap bucket, controlling for
-the free F-score, the AI signal showed *no clear improvement* on the (underpowered) 10-cohort
-data — a sobering moment. Separately, we found a **free deterioration signal**: Sharadar tags
+the free F-score, the AI signal showed *no clear improvement* on the **earlier ~10-cohort FMP-era
+subset** (this is the "10-cohort" data — a smaller, pre-Sharadar window, distinct from the
+24-cohort leading-indicator panel below) — a sobering moment. Separately, we found a **free deterioration signal**: Sharadar tags
 "hard" bad-news 8-K events (bankruptcy, restatement, auditor resignation, default); cheap names
 with a recent such event **underperform by ~5%/yr (t≈3.8) — for free.** This reframed the real
 question to point 6.
@@ -97,7 +108,8 @@ question to point 6.
 *lagging* (by the time a bankruptcy is filed, the stock has already cratered). The bet is the
 language softens *first*. Test: among names with **no hard event in the past year** (nothing
 officially wrong yet), does the AI's language score *still* predict underperformance?
-- **Yes — IC +0.113 (t≈2.2) at 3 months, +0.141 (t≈2.6) at 6 months**, among event-clean names.
+- **Yes — IC +0.113 (t 2.15) at 3 months, +0.141 (t 2.63) at 6 months**, among event-clean names
+  (committed per-cohort: [`results/l3_leading_indicator_ic.csv`](../results/l3_leading_indicator_ic.csv)).
 - And it was **stronger** among event-clean names than across all names — the textbook
   signature of a **leading indicator** (it sees trouble before any hard signal exists).
 - Economic size: clean-language cheap names beat deteriorating-language cheap names by
@@ -128,4 +140,13 @@ significance is **solid but modest** (t≈2–2.6). This is concentrated deep va
 deploying rests on three legs together: the significant *component* evidence, the published
 economic reason the anomaly *persists*, and forward paper-trading to confirm it keeps working.
 
-**Verdict:** worth building and deploying — with eyes open about the modest magnitude.
+**Scope & maturity — what this is NOT.** This document validates the *signal*, not the *system*.
+The production code (L0–L7, ~5.2k LOC, 8 layers) is **research-grade, lightly tested** — ~49 unit
+tests across 7 files, covering the deterministic funnel math and the agent-contract plumbing, not
+end-to-end behaviour. That is an order of magnitude below the predecessor's ~300 tests; treat
+deepvalue as a validated *thesis with a working prototype*, not hardened infrastructure. The
+agentic L4/L5 layers in particular **run to completion but are not proven to produce good
+verdicts** (see the README) — they are an engineering result, not a validated analytical one.
+
+**Verdict:** worth building and deploying — with eyes open about the modest magnitude and the
+prototype-grade maturity.
