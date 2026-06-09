@@ -382,6 +382,8 @@ def _healthcheck(max_age_hours: float = 192.0) -> int:
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+    logging.getLogger("httpx").setLevel(logging.WARNING)  # httpx logs request URLs at INFO —
+    # the Telegram token (and any ?apikey=) sits in the URL, so this keeps secrets out of logs.
     ap = argparse.ArgumentParser(description="Live Tedium Premium session (forward path)")
     ap.add_argument("--as-of", default=date.today().isoformat())
     ap.add_argument("--days-back", type=int, default=7, help="EDGAR filer window to scan")

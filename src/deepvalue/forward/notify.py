@@ -28,6 +28,9 @@ from pathlib import Path
 import httpx
 
 logger = logging.getLogger(__name__)
+# Defense-in-depth: the Telegram token is in the request URL path and httpx logs URLs at INFO.
+# Force the httpx logger to WARNING so the token never reaches a log file, regardless of caller.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 DEFAULT_HEARTBEAT_PATH = Path("data/forward/last_run.json")
 

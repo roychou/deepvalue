@@ -61,6 +61,7 @@ async def _run(ticker: str, as_of: str, cap: float) -> int:
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+    logging.getLogger("httpx").setLevel(logging.WARNING)  # keep request URLs (tokens) out of logs
     ap = argparse.ArgumentParser(description="L4->L5 forensic deep-dive (operator-run)")
     ap.add_argument("--ticker", required=True)
     ap.add_argument("--as-of", default=date.today().isoformat())
