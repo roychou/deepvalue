@@ -22,9 +22,61 @@ from deepvalue.agents.subagents import (
     skeptic,
 )
 from deepvalue.agents.tools import TOOL_NAMES, deepvalue_tools_server
-from deepvalue.contracts.models import ForensicFinding
+from deepvalue.contracts.models import ForensicFinding, Objection, ThesisVerdict
 
 log = logging.getLogger("tedium.agents")
+
+
+# --- tolerant coercion: the SDK agents emit valid JSON but with their OWN field names + rich
+# nested content; these map whatever they produce into the §12 contracts, defaulting unknowns and
+# preserving the agent's substance in the free-text field rather than dropping it. ---
+def _f01(x, default=0.5) -> float:
+    try:
+        return max(0.0, min(1.0, float(x)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _num(x):
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return None
+
+
+def _strs(x) -> list[str]:
+    if isinstance(x, list):
+        return [str(v) for v in x]
+    return [str(x)] if x else []
+
+
+def coerce_finding(d, ticker: str, agent: str) -> ForensicFinding:
+    import json
+    if not isinstance(d, dict):
+        d = {"rationale": str(d)}
+    return ForensicFinding(
+        ticker=str(d.get("ticker") or ticker), agent=agent,
+        finding_type=str(d.get("finding_type") or d.get("type") or d.get("category") or "finding"),
+        severity=_f01(d.get("severity", d.get("risk", 0.5))),
+        impairs_book_value=bool(d.get("impairs_book_value", d.get("impairs_book", False))),
+        est_impact_usd=_num(d.get("est_impact_usd") or d.get("est_impact") or d.get("impact_usd")),
+        citation=_strs(d.get("citation") or d.get("citations") or d.get("evidence") or []),
+        rationale=str(d.get("rationale") or d.get("finding") or d.get("summary") or json.dumps(d)[:1200]),
+        requires_rebuttal=bool(d.get("requires_rebuttal", True)))
+
+
+def coerce_objection(d, i: int) -> Objection:
+    import json
+    if not isinstance(d, dict):
+        d = {"claim": str(d)}
+    status = d.get("status")
+    return Objection(
+        id=str(d.get("id") or f"O{i}"),
+        type=str(d.get("type") or d.get("objection_type") or "general"),
+        claim=str(d.get("claim") or d.get("objection") or d.get("text") or json.dumps(d)[:800]),
+        routed_to=str(d.get("routed_to") or d.get("specialist") or "asset"),
+        status=status if status in ("open", "rebutted", "sustained") else "open",
+        evidence=_strs(d.get("evidence") or d.get("citation") or []))
 
 # name -> AgentDefinition. Names match the keys callers pass to run_subagent / client.query(agent=).
 SUBAGENTS = {

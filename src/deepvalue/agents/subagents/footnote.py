@@ -50,12 +50,14 @@ def _prompt(ticker: str, as_of: str) -> str:
 
 async def find(ticker: str, as_of: str, *, budget) -> list[ForensicFinding]:
     """Run the Footnote Archaeologist and parse its structured output into ForensicFinding[]."""
-    from deepvalue.agents.harness import parse_json, run_subagent  # lazy — breaks import cycle
+    from deepvalue.agents.harness import coerce_finding, parse_json, run_subagent  # lazy
     raw = await run_subagent(AGENT_KEY, _prompt(ticker, as_of), budget=budget)
     if not raw.strip():
         return []
     try:
-        return [ForensicFinding(**f) for f in parse_json(raw)]
+        data = parse_json(raw)
+        items = data if isinstance(data, list) else [data]
+        return [coerce_finding(f, ticker, AGENT_KEY) for f in items]
     except Exception:  # noqa: BLE001 — a malformed dossier entry can't sink the whole layer
         logging.getLogger("tedium.agents").warning("footnote: could not parse findings")
         return []

@@ -62,13 +62,29 @@ def _default_pass(ticker: str, as_of: str, bull_summary: str,
 
 async def adjudicate(ticker: str, as_of: str, bull_summary: str, objections: list[Objection], *,
                      budget) -> ThesisVerdict:
-    """Run the judge and parse the ThesisVerdict; default to PASS if unparseable (Burry tilt)."""
-    from deepvalue.agents.harness import parse_json, run_subagent  # lazy — breaks import cycle
+    """Run the judge and coerce its JSON into a ThesisVerdict; default to PASS if unusable (Burry
+    tilt). Tolerant of the agent's own field names — captures its real decision + surviving risks."""
+    from deepvalue.agents.harness import _f01, _num, _strs, parse_json, run_subagent  # lazy
     raw = await run_subagent(AGENT_KEY, _prompt(ticker, as_of, bull_summary, objections), budget=budget)
     if not raw.strip():
         return _default_pass(ticker, as_of, bull_summary, objections)
     try:
-        return ThesisVerdict(**parse_json(raw))
+        d = parse_json(raw)
+        if not isinstance(d, dict):
+            raise ValueError("verdict is not an object")
+        dec = str(d.get("decision") or d.get("verdict") or "PASS").upper()
+        if dec not in ("BUY", "WATCH", "PASS"):
+            dec = "PASS"
+        mos = _num(d.get("margin_of_safety") or d.get("mos"))
+        return ThesisVerdict(
+            ticker=ticker, as_of=date.fromisoformat(as_of), decision=dec,
+            conviction=_f01(d.get("conviction", 0.0), 0.0),
+            margin_of_safety=mos if mos is not None else 0.0,
+            surviving_risks=_strs(d.get("surviving_risks") or d.get("risks")
+                                  or d.get("unresolved_objections") or []),
+            dependencies=_strs(d.get("dependencies") or d.get("catalysts") or []),
+            unresolved_objections=[o for o in objections if o.status != "rebutted"],
+            bull_summary=bull_summary[:2000])
     except Exception:  # noqa: BLE001
-        logging.getLogger("tedium.agents").warning("judge: unparseable verdict -> default PASS")
+        logging.getLogger("tedium.agents").warning("judge: unusable verdict -> default PASS")
         return _default_pass(ticker, as_of, bull_summary, objections)

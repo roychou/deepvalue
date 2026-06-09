@@ -62,12 +62,14 @@ def _prompt(ticker: str, as_of: str, bull_summary: str, dossier: str) -> str:
 async def attack(ticker: str, as_of: str, bull_summary: str, dossier: str, *,
                  budget) -> list[Objection]:
     """Run the skeptic and parse its typed objections into Objection[]."""
-    from deepvalue.agents.harness import parse_json, run_subagent  # lazy — breaks import cycle
+    from deepvalue.agents.harness import coerce_objection, parse_json, run_subagent  # lazy
     raw = await run_subagent(AGENT_KEY, _prompt(ticker, as_of, bull_summary, dossier), budget=budget)
     if not raw.strip():
         return []
     try:
-        return [Objection(**o) for o in parse_json(raw)]
+        data = parse_json(raw)
+        items = data if isinstance(data, list) else [data]
+        return [coerce_objection(o, i) for i, o in enumerate(items)]
     except Exception:  # noqa: BLE001 — no parseable objections -> none survive (judge still runs)
         logging.getLogger("tedium.agents").warning("skeptic: could not parse objections")
         return []

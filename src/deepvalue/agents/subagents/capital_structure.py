@@ -44,12 +44,14 @@ def _prompt(ticker: str, as_of: str) -> str:
 
 async def find(ticker: str, as_of: str, *, budget) -> list[ForensicFinding]:
     """Run the Capital-Structure agent and parse its structured output into ForensicFinding[]."""
-    from deepvalue.agents.harness import parse_json, run_subagent  # lazy — breaks import cycle
+    from deepvalue.agents.harness import coerce_finding, parse_json, run_subagent  # lazy
     raw = await run_subagent(AGENT_KEY, _prompt(ticker, as_of), budget=budget)
     if not raw.strip():
         return []
     try:
-        return [ForensicFinding(**f) for f in parse_json(raw)]
+        data = parse_json(raw)
+        items = data if isinstance(data, list) else [data]
+        return [coerce_finding(f, ticker, AGENT_KEY) for f in items]
     except Exception:  # noqa: BLE001
         logging.getLogger("tedium.agents").warning("capital_structure: could not parse findings")
         return []
