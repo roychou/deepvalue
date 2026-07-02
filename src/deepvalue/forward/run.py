@@ -41,7 +41,12 @@ OUT_DIR = ROOT / "data" / "forward"
 RECENCY_DAYS = 550   # fundamentals must be filed within ~18 months to count as "current"
 ADV_WINDOW = 60
 MIN_F_CHECKS = 7     # EDGAR micro-cap XBRL is incomplete; relax the backtest's strict ==9
-DET_KILL = 0.5       # MD&A deterioration >= this flags DETERIORATING + blocks BUY (L3 lead)
+# MD&A deterioration >= this flags DETERIORATING + blocks BUY (L3 lead). Threshold is
+# MODEL-CALIBRATED: Sonnet 5 scores the same filings ~+0.13 higher than sonnet-4-6 (rank
+# order near-identical, spearman +0.86). 0.65 on Sonnet 5 reproduces the kill-rate that 0.5
+# gave on sonnet-4-6 (~58% of the cheap-name panel) — see results/l3_sonnet5_revalidation.md.
+# Re-derive this whenever ROOT changes in models.py.
+DET_KILL = 0.65
 
 
 def _adv(prices: dict, as_of: str) -> float | None:

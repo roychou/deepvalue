@@ -26,7 +26,15 @@ class ModelSpec:
 # ROOT makes the judgments (fundamentals/technicals + sentiment/news synthesis);
 # LEAF does the cheap sentiment/news map-reduce leaf step. Cutoffs/prices verified
 # against the Claude models overview (see notes/productization.md 0.0).
-ROOT = ModelSpec("claude-sonnet-4-6", "2026-01-31", 3.0, 15.0)
+#
+# ROOT moved claude-sonnet-4-6 → claude-sonnet-5 (2 Jul 2026; dateless ID but a pinned
+# snapshot per the 4.6+ naming convention). Same Jan-2026 training cutoff as Sonnet 4.6,
+# so DECISION_MODEL_CUTOFF is unchanged. Metered at the $3/$15 sticker — intro pricing
+# ($2/$10 through 2026-08-31) means actual spend runs below the meter until then. Sonnet 5
+# uses the Opus-4.7 tokenizer (~30% more tokens for the same text), so per-call token
+# counts rise even where cost doesn't. Per this file's contract: re-run the L3 validation
+# suite before trusting live signals from the new ROOT.
+ROOT = ModelSpec("claude-sonnet-5", "2026-01-31", 3.0, 15.0)
 LEAF = ModelSpec("claude-haiku-4-5-20251001", "2025-07-31", 1.0, 5.0)
 
 REGISTRY: dict[str, ModelSpec] = {ROOT.id: ROOT, LEAF.id: LEAF}
@@ -57,6 +65,9 @@ LADDER_MODELS: dict[str, ModelSpec] = {
     "claude-opus-4-1-20250805":  ModelSpec("claude-opus-4-1-20250805",  "2025-03-31", 15.0, 75.0),   # ~55; durable Mar-2025 rung; pricey
     "claude-sonnet-4-5-20250929": ModelSpec("claude-sonnet-4-5-20250929", "2025-07-31",  3.0, 15.0),  # ~38; cheap, not retiring
     "claude-opus-4-20250514":    ModelSpec("claude-opus-4-20250514",    "2025-03-31", 15.0, 75.0),   # ~55; retires 2026-06-15
+    # Not an earlier-cutoff rung (same Jan-2026 cutoff as Sonnet 5): the prior validated
+    # ROOT, kept priceable for A/B re-validation of the Sonnet 5 materiality scorer.
+    "claude-sonnet-4-6":         ModelSpec("claude-sonnet-4-6",         "2026-01-31",  3.0, 15.0),
 }
 
 

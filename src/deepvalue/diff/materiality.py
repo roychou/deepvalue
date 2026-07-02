@@ -116,7 +116,11 @@ def score_materiality(client, changed_text: str, model: str = ROOT.id) -> Materi
     result plus this call's USD cost (so the caller can enforce a budget)."""
     resp = client.messages.create(
         model=model,
-        max_tokens=500,
+        max_tokens=700,   # headroom for the Sonnet 5 tokenizer (~30% more tokens/text)
+        # Sonnet 5 runs ADAPTIVE thinking when `thinking` is omitted (4.6 ran thinking-off);
+        # thinking spends from max_tokens and would truncate the JSON. Pin the validated
+        # thinking-off behavior explicitly.
+        thinking={"type": "disabled"},
         output_config={
             "format": {"type": "json_schema", "schema": _SCHEMA},
             "effort": "low",   # cheap classification — no deep thinking needed

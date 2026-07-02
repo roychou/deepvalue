@@ -4,18 +4,24 @@
 
 nodes:
   triage:            claude-haiku-4-5-20251001     # L2 cheap gate
-  diff_materiality:  claude-sonnet-4-6             # L3 materiality on changed spans
-  forensic:          claude-sonnet-4-6             # L4 footnote / asset / capital-structure
-  adversarial:       claude-sonnet-4-6             # L5 bull / skeptic / judge
-  # ^ Sonnet, not Opus: 5x cheaper and strong on filing reasoning/reconciliation; Opus's edge is
-  #   concentrated on novel-fraud cases where even Opus is unreliable (spec §8). Escalate a single
-  #   role (e.g. the judge) to claude-opus-4-8 only if real cases show Sonnet is too lenient.
+  diff_materiality:  claude-sonnet-5               # L3 materiality on changed spans
+  forensic:          claude-sonnet-5               # L4 footnote / asset / capital-structure
+  adversarial:       claude-sonnet-5               # L5 bull / skeptic / judge
+  # ^ Sonnet, not Opus: ~1.7x cheaper vs claude-opus-4-8 ($3/$15 vs $5/$25; 2.5x on Sonnet 5
+  #   intro pricing through 2026-08-31), near-Opus on filing reasoning/reconciliation; Opus's
+  #   edge is concentrated on novel-fraud cases where even Opus is unreliable (spec §8).
+  #   Escalate a single role (e.g. the judge) to claude-opus-4-8 only if real cases show
+  #   Sonnet is too lenient.
+  # Sonnet 5 migration (2 Jul 2026): sonnet-4-6 → sonnet-5 on all three Sonnet nodes. Same
+  #   Jan-2026 training cutoff, so the contamination boundary is unchanged. L3 was validated
+  #   on sonnet-4-6 — re-validate the materiality scorer before trusting live signals.
 
 # Backtest / ladder note: for a contamination-free L3 anomaly test, run the materiality model
 # over dates AFTER its training cutoff (or accept that L3 materiality is a near-deterministic
 # classification of *changed text*, which leaks far less than opinion — see spec §13/parley work).
-training_cutoffs:   # verified platform.claude.com 2026-06-04; RE-VERIFY before relying on these
+training_cutoffs:   # verified platform.claude.com 2026-07-02; RE-VERIFY before relying on these
   claude-haiku-4-5-20251001: "2025-07-31"
+  claude-sonnet-5: "2026-01-31"
   claude-sonnet-4-6: "2026-01-31"
   claude-sonnet-4-5-20250929: "2025-07-31"
   claude-opus-4-8: "2026-01-31"
