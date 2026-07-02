@@ -33,7 +33,10 @@ async def _run() -> int:
     books = load_books()
     if not books:
         log.info("no books yet — nothing to calibrate")
-        notify.notify("L7 calibration — no data", "No weekly books emitted yet; nothing to score.")
+        notify.notify("L7 calibration — no data",
+                      "The monthly decay alarm ran, but no weekly books have been emitted yet, "
+                      "so there is no track record to score. Nothing is wrong — this resolves "
+                      "itself once the weekly screen has produced its first book.")
         return 0
     as_ofs = sorted(b.get("as_of") for b in books if b.get("as_of"))
     tickers = sorted({c["ticker"] for b in books for c in b.get("book", [])})
@@ -67,30 +70,54 @@ async def _run() -> int:
     return 0
 
 
+_MONTHS = {63: "~3 months", 126: "~6 months", 252: "~12 months"}
+
+
 def _summary(rep: dict) -> str:
-    lines = [f"Books: {rep['n_books']} over {rep['span'][0]}..{rep['span'][1]} | "
-             f"outcomes {rep['n_realized']}/{rep['n_outcomes']} matured",
-             "Decay alarm — forward IC of -deterioration (positive = edge holds):"]
+    """Plain-language monthly readout. Written for the phone reader: say what the decay alarm
+    is, what 'matured' means, and what the numbers say — not just IC/n shorthand."""
+    lines = [
+        "This is the monthly decay alarm: it checks whether the language-deterioration signal "
+        "is still predicting forward returns on the names the live rig actually booked — "
+        "a true out-of-sample test of the edge.",
+        "",
+        f"Track record so far: {rep['n_books']} weekly books from {rep['span'][0]} to "
+        f"{rep['span'][1]}. Of {rep['n_outcomes']} booked positions x horizons, "
+        f"{rep['n_realized']} have matured (enough trading days have passed to measure the "
+        f"forward return).",
+        "",
+        "Per horizon (positive correlation = deteriorating names underperformed = edge holds):",
+    ]
     matured = False
     for h in rep["horizons"]:
-        ic, n = h["ic_neg_deterioration"], h["n"]
+        ic, n, label = h["ic_neg_deterioration"], h["n"], _MONTHS.get(
+            h["horizon_days"], f"{h['horizon_days']} trading days")
         if ic is None or n < MIN_N:
-            lines.append(f"  {h['horizon_days']}d: no matured data yet (n={n})")
+            lines.append(f"• {label}: not enough positions old enough to measure yet "
+                         f"({n} matured; need {MIN_N}+).")
             continue
         matured = True
         sp = h["spread"]
-        spread = "n/a" if sp is None else f"{sp * 100:+.1f}%"
-        lines.append(f"  {h['horizon_days']}d: IC={ic:+.3f} (n={n}) | BUY-WATCH spread {spread} "
-                     f"({h['n_buy']}/{h['n_watch']})")
+        spread = ("the BUY-vs-WATCH return gap isn't measurable yet" if sp is None else
+                  f"BUYs outperformed WATCHes by {sp * 100:+.1f}% "
+                  f"({h['n_buy']} BUYs vs {h['n_watch']} WATCHes)")
+        lines.append(f"• {label}: correlation between deterioration score and forward return "
+                     f"is {ic:+.3f} across {n} matured positions; {spread}.")
+    lines.append("")
     if not matured:
-        lines.append("Verdict: rig still young — not enough matured forward returns to judge. Holding.")
+        lines.append("Verdict: the rig is still too young to judge — most positions haven't "
+                     "been held long enough to measure a forward return. No action needed; "
+                     "this alarm re-runs monthly and will say so when real numbers exist.")
     else:
         best = max((h for h in rep["horizons"] if h["ic_neg_deterioration"] is not None and h["n"] >= MIN_N),
                    key=lambda h: h["n"])
         ic = best["ic_neg_deterioration"]
-        lines.append("Verdict: " + ("edge INTACT out-of-sample (positive IC)." if ic > 0.02
-                     else "⚠️ DECAY WATCH — forward IC not positive; investigate before trusting L3."))
-        lines.append("(Small n — noisy; read as a trend, not significance.)")
+        lines.append("Verdict: " + (
+            "the edge looks INTACT out-of-sample — deteriorating-language names are "
+            "underperforming, as the backtest predicted." if ic > 0.02
+            else "⚠️ DECAY WATCH — the signal is NOT predicting underperformance in live "
+                 "forward data. Investigate before trusting the language check for BUYs."))
+        lines.append("(Sample is still small, so read this as a trend, not proof.)")
     return "\n".join(lines)
 
 
@@ -104,7 +131,10 @@ def main() -> None:
         raise
     except Exception as e:  # noqa: BLE001 — a calibration failure must alert, not silently die
         logging.getLogger("tedium.calibration").exception("calibration failed")
-        notify.notify("⚠️ L7 calibration FAILED", f"{type(e).__name__}: {e}")
+        notify.notify("⚠️ L7 calibration FAILED",
+                      f"The monthly decay alarm crashed before producing a report — no "
+                      f"calibration was recorded this month.\n\nError: {type(e).__name__}: {e}\n\n"
+                      f"Check the container logs: docker logs tediumpremium-app.")
         raise SystemExit(1) from e
 
 

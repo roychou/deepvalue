@@ -192,47 +192,74 @@ def _candidate_dossier(c: dict) -> str:
 
 
 def _why(c: dict) -> str:
-    """One-line, plain-language reason for a name's verdict — the 'chain of thought'."""
+    """Plain-language reason for a name's verdict — the 'chain of thought'. Written for the
+    phone-alert reader: spell out each metric and the bar it hit or missed, no bare jargon."""
     mos, det, flags = c.get("margin_of_safety"), c.get("deterioration"), c.get("flags", [])
     if c["verdict"] == "BUY":
-        bits = [f"cheap (MoS {mos:.0%})" if mos is not None else "asset-backed", f"F{c['f_score']}",
-                f"clean language (L3 {det})" if det is not None else "clean"]
+        bits = [f"trades at a {mos:.0%} discount to conservative asset value" if mos is not None
+                else "asset-backed",
+                f"financially strong (Piotroski F-score {c['f_score']} of 9)"]
+        if det is not None:
+            bits.append(f"this year's 10-K language shows no deterioration vs last year "
+                        f"(score {det}, low is good)")
         if c.get("l5_decision"):
-            bits.append(f"L5 cleared (conv {c.get('l5_conviction')})")
-        return "BUY — " + ", ".join(bits)
+            bits.append(f"the adversarial trap filter found no disqualifying risk "
+                        f"(conviction {c.get('l5_conviction')})")
+        return "BUY — " + "; ".join(bits)
     reasons = []
     if (c.get("f_score") or 0) < 7:
-        reasons.append(f"F{c.get('f_score')}<7")
+        reasons.append(f"financial health below the bar (Piotroski F-score {c.get('f_score')} "
+                       f"of 9; BUY needs 7+)")
     if mos is None or mos < 0.40:
-        reasons.append(f"MoS {mos:.0%}<40%" if mos is not None else "no asset discount")
+        reasons.append(f"not cheap enough ({mos:.0%} discount to conservative asset value; "
+                       f"BUY needs 40%+)" if mos is not None
+                       else "no discount to conservative asset value")
     if "DETERIORATING" in flags:
-        reasons.append(f"MD&A DETERIORATING (L3 {det})")
+        reasons.append(f"10-K language DETERIORATED vs last year (score {det} — softened or "
+                       f"removed reassurance tends to LEAD bad news, so this blocks a BUY)")
     if "DISTRESS" in flags:
-        reasons.append("Altman DISTRESS")
+        reasons.append("balance sheet flags distress risk (Altman Z in the distress zone)")
     if "LOW_RUNWAY" in flags:
-        reasons.append("low cash runway")
+        reasons.append("thin cash runway at the current burn rate")
     if "NO_L3_READ" in flags:
-        reasons.append("MD&A unreadable -> not cleared")
+        reasons.append("could not extract the MD&A section, so the language check couldn't "
+                       "clear it — an unread name is never bought")
     if "L5_KILL" in flags:
-        reasons.append(f"L5 trap-filter killed: {(c.get('l5_risks') or ['trap'])[0]}")
-    return "WATCH — " + ("; ".join(reasons) if reasons else "did not clear all BUY gates")
+        reasons.append(f"the adversarial trap filter killed it — top surviving risk: "
+                       f"{(c.get('l5_risks') or ['unspecified trap risk'])[0]}")
+    return "WATCH (hold off) — " + ("; ".join(reasons) if reasons else
+                                    "did not clear every BUY gate")
 
 
 def _reasoning_digest(as_of: str, n_universe: int, cands: list[dict], book: list[dict],
                       acct: str) -> str:
     """A richer, explanatory alert body — what the screen did and WHY each name landed where it
-    did (chain-of-thought), so the ping explains the decision, not just the count."""
+    did (chain-of-thought), so the ping explains the decision, not just the count. Written for
+    the phone reader: each step of the funnel gets a sentence, not an arrow chain."""
     n_buy = sum(1 for c in book if c["verdict"] == "BUY")
-    lines = [f"Tedium Premium — {as_of} (acct {acct})",
-             f"{n_universe} recent EDGAR filers -> {len(cands)} screenable -> book {len(book)}, "
-             f"{n_buy} BUY."]
+    lines = [f"Tedium Premium weekly screen — {as_of} (paper account {acct})",
+             "",
+             f"What happened: scanned {n_universe} companies that filed a 10-K or 10-Q with the "
+             f"SEC this week. {len(cands)} were screenable (priced, enough fundamentals to "
+             f"judge). The value screen kept {len(book)} for this week's book, of which "
+             f"{n_buy} rate BUY."]
     if not book:
-        lines.append("No name cleared the screen (cheap-on-assets + healthy + liquid).")
+        lines.append("")
+        lines.append("No name cleared the screen this week — nothing was both cheap against "
+                     "its tangible assets AND financially healthy AND liquid enough to trade. "
+                     "That's normal; the screen is deliberately strict.")
         return "\n".join(lines)
-    lines.append("BUY bar: F>=7, margin-of-safety>=40%, no risk flags, L3 language not deteriorating"
-                 + (", L5 trap-filter cleared." if any(c.get("l5_decision") for c in book) else "."))
+    lines.append("")
+    lines.append("A BUY must clear ALL of: financially strong (Piotroski F-score 7+ of 9); "
+                 "priced at 40%+ discount to conservative asset value; no distress or dilution "
+                 "flags; and this year's 10-K language not deteriorating vs last year's "
+                 "(deteriorating language tends to lead bad news)"
+                 + (", plus a clean pass from the adversarial trap filter."
+                    if any(c.get("l5_decision") for c in book) else "."))
+    lines.append("")
+    lines.append("This week's names, best first:")
     for c in sorted(book, key=lambda x: x.get("composite", 0), reverse=True):
-        lines.append(f"- {c['ticker']} @ ${c.get('price')}: {_why(c)}")
+        lines.append(f"• {c['ticker']} at ${c.get('price')}: {_why(c)}")
     return "\n".join(lines)
 
 
@@ -309,7 +336,10 @@ async def _session(as_of: str, days_back: int, max_positions: int, p_tbv_max: fl
             n_blocked = sum(1 for c in book if "NO_L3_READ" in c["flags"])
             log.info("Deterioration Lead: scored %d/%d, spent $%.2f (%d BUY blocked: no read)",
                      len(det), len(book), spent, n_blocked)
-            l3_note = f" | L3 {len(det)}/{len(book)} (${spent:.2f})"
+            l3_note = (f"\n\nLanguage check: read the MD&A of {len(det)} of {len(book)} book "
+                       f"names year-over-year (${spent:.2f} spent of the ${max_llm_usd:.2f} "
+                       f"cap)." + (f" {n_blocked} would-be BUY(s) held back because their MD&A "
+                                   f"couldn't be read." if n_blocked else ""))
 
         # 6) L4 forensic + L5 adversarial trap filter on the BUY shortlist (opt-in, capped).
         #    Spec gate: a clean screen alone never triggers BUY — L5 must clear. Runs only on BUYs
@@ -366,7 +396,16 @@ async def _session(as_of: str, days_back: int, max_positions: int, p_tbv_max: fl
                 max_weight=POLICY.get("max_position_weight", 0.06), transmit=transmit)
             mode = "TRANSMITTED" if transmit else "PREVIEW"
             log.info("rebalance (%s): %d orders planned", mode, len(rb["plans"]))
-            digest += f" | rebalance {mode}: {len(rb['plans'])} orders"
+            n_orders = len(rb["plans"])
+            if n_orders == 0:
+                digest += ("\n\nPaper trading: no orders — the paper account already matches "
+                           "the target book.")
+            elif transmit:
+                digest += (f"\n\nPaper trading: sent {n_orders} order(s) to the paper account "
+                           f"to move it toward the BUY book.")
+            else:
+                digest += (f"\n\nPaper trading: {n_orders} order(s) planned but NOT sent "
+                           f"(preview mode — run with --transmit to execute).")
     finally:
         ib.disconnect()
 
@@ -378,8 +417,12 @@ def _healthcheck(max_age_hours: float = 192.0) -> int:
     """Watchdog (daily cron): alert + nonzero exit if the weekly clock has gone quiet."""
     hb = notify.read_heartbeat()
     if notify.heartbeat_stale(hb, max_age_hours):
+        detail = (f"Last recorded run: {hb.as_of} (status: {hb.status}, at {hb.ts})."
+                  if hb else "No successful run has ever been recorded on this host.")
         notify.notify("⚠️ Tedium Premium forward: STALE",
-                      f"last heartbeat: {hb}" if hb else "no heartbeat on record")
+                      f"The weekly screen has not completed successfully in over "
+                      f"{max_age_hours / 24:.0f} days — the clock may have gone quiet. {detail} "
+                      f"Check the container: docker logs tediumpremium-app.")
         return 1
     log.info("healthcheck OK: %s", hb)
     return 0
@@ -422,7 +465,10 @@ def main() -> None:
     except Exception as e:  # noqa: BLE001 — record the failure loudly, then re-raise
         log.exception("forward session FAILED")
         notify.write_heartbeat("error", args.as_of, f"{type(e).__name__}: {e}")
-        notify.notify(f"❌ Tedium Premium forward FAILED ({args.as_of})", f"{type(e).__name__}: {e}")
+        notify.notify(f"❌ Tedium Premium forward FAILED ({args.as_of})",
+                      f"The weekly screen crashed before completing — no book was emitted and "
+                      f"no orders were placed this week.\n\nError: {type(e).__name__}: {e}\n\n"
+                      f"Check the container logs: docker logs tediumpremium-app.")
         raise
 
 

@@ -76,6 +76,8 @@ def send_telegram(text: str) -> bool:
     if not (token and chat_id):
         logger.info("telegram alert skipped: TELEGRAM_BOT_TOKEN/CHAT_ID not set")
         return False
+    if len(text) > 4096:  # Telegram hard limit — a too-long body fails with HTTP 400
+        text = text[:4000] + "\n…[truncated — full text in the run artifacts]"
     try:
         r = httpx.post(f"https://api.telegram.org/bot{token}/sendMessage",
                        json={"chat_id": chat_id, "text": text, "disable_web_page_preview": True},
