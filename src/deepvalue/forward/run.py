@@ -29,7 +29,7 @@ import yaml
 from deepvalue.forward import ibkr_execution, ibkr_prices, notify
 from deepvalue.forward.universe import cik_to_ticker_map, recent_filers
 from deepvalue.ingest import edgar_fundamentals as ef
-from deepvalue.ingest.edgar import company_sic, is_excluded_sector
+from deepvalue.ingest.edgar import EdgarError, company_sic, is_excluded_sector
 from deepvalue.quant.metrics import value_metrics
 from deepvalue.quant.trap_signals import trap_signals
 
@@ -41,12 +41,20 @@ OUT_DIR = ROOT / "data" / "forward"
 RECENCY_DAYS = 550   # fundamentals must be filed within ~18 months to count as "current"
 ADV_WINDOW = 60
 MIN_F_CHECKS = 7     # EDGAR micro-cap XBRL is incomplete; relax the backtest's strict ==9
+EDGAR_FAILURE_TOLERANCE = 0.15  # share of the universe that may fail EDGAR before we abort
 # MD&A deterioration >= this flags DETERIORATING + blocks BUY (L3 lead). Threshold is
 # MODEL-CALIBRATED: Sonnet 5 scores the same filings ~+0.13 higher than sonnet-4-6 (rank
 # order near-identical, spearman +0.86). 0.65 on Sonnet 5 reproduces the kill-rate that 0.5
 # gave on sonnet-4-6 (~58% of the cheap-name panel) — see results/l3_sonnet5_revalidation.md.
 # Re-derive this whenever ROOT changes in models.py.
 DET_KILL = 0.65
+
+
+def _max_edgar_failures(n_universe: int) -> int:
+    """How many per-name EDGAR failures a run tolerates before it calls EDGAR itself broken.
+    Generous in absolute terms (small universes shouldn't trip on two bad filers), capped in
+    relative terms (a big universe failing 15% of the way through is an outage, not bad luck)."""
+    return max(10, int(n_universe * EDGAR_FAILURE_TOLERANCE))
 
 
 def _adv(prices: dict, as_of: str) -> float | None:
@@ -104,10 +112,30 @@ def screen_one(ticker: str, cik: str, as_of: str, prices: dict,
 def fundamental_prefilter(universe: list[tuple[str, str]], as_of: str, min_f: int) -> list[tuple[str, str]]:
     """Narrow the universe on the FREE, price-independent signals (Piotroski-F, dilution,
     sector) using only EDGAR — so IBKR prices are fetched for the dozens of survivors, not the
-    hundreds of filers (respects IBKR's ~60-historical-req/10min pacing). Point-in-time."""
+    hundreds of filers (respects IBKR's ~60-historical-req/10min pacing). Point-in-time.
+
+    One unreadable filer must never cost the week (2026-08-03: a single 404 on CIK 0000071508's
+    companyfacts aborted the whole run), so per-name EDGAR failures drop that name and carry on
+    — the same contract `ibkr_prices.fetch_daily_bars` already applies to prices. But the
+    tolerance is BOUNDED: past `_max_edgar_failures`, EDGAR itself is failing (throttled, UA
+    blocked, down) and the run aborts loudly, because the alternative is screening almost
+    nothing and reporting it as a legitimately quiet week."""
     survivors: list[tuple[str, str]] = []
+    budget = _max_edgar_failures(len(universe))
+    failures: list[str] = []
     for ticker, cik in universe:
-        p = ef.as_of(ticker, as_of)
+        try:
+            p = ef.as_of(ticker, as_of)
+        except EdgarError as e:  # per-name: unreadable filer, not a broken run
+            failures.append(ticker)
+            log.warning("EDGAR failed for %s (%s) — skipping name [%d/%d tolerated]",
+                        ticker, type(e).__name__, len(failures), budget)
+            if len(failures) > budget:
+                raise EdgarError(
+                    f"aborting: {len(failures)} EDGAR failures in {len(universe)} names "
+                    f"exceeds the {budget} tolerated — EDGAR looks unavailable rather than "
+                    f"these filers being unreadable. Last: {type(e).__name__}: {e}") from e
+            continue
         if p is None or (date.fromisoformat(as_of) - date.fromisoformat(p.filing_date)).days > RECENCY_DAYS:
             continue
         ts = trap_signals(p, ef.prior_year(ticker, p), 1.0)  # price=1.0: F & dilution ignore it
@@ -119,6 +147,9 @@ def fundamental_prefilter(universe: list[tuple[str, str]], as_of: str, min_f: in
         if is_excluded_sector(company_sic(cik)):
             continue
         survivors.append((ticker, cik))
+    if failures:
+        log.info("EDGAR unreadable for %d/%d names (tolerated, dropped): %s",
+                 len(failures), len(universe), ", ".join(failures[:20]))
     return survivors
 
 
@@ -291,9 +322,8 @@ async def _session(as_of: str, days_back: int, max_positions: int, p_tbv_max: fl
 
     # 3) current prices from IBKR (listed-floored), paper-guarded — connection stays open
     #    through any execution, then closes.
-    ib = await ibkr_prices.connect()
+    ib, acct = await ibkr_prices.connect_ready()
     try:
-        acct = ibkr_prices.assert_paper_ready(ib)
         prices = await ibkr_prices.fetch_prices_for(ib, [t for t, _ in survivors], lookback_days=400)
 
         # 4) funnel -> ranked book (price-dependent gates + composite)
@@ -413,19 +443,51 @@ async def _session(as_of: str, days_back: int, max_positions: int, p_tbv_max: fl
     return digest
 
 
+# The weekly job redirects its own stdout/stderr to a file on the mounted `forward` volume,
+# so `docker logs` shows only supercronic's exit status — the traceback is in cron.log.
+_LOG_HINT = ("Logs: docker compose exec app tail -200 /app/data/forward/logs/cron.log "
+             "(`docker logs tediumpremium-app` shows only the scheduler's exit status, not "
+             "the traceback — the job redirects its output to that file).")
+
+
 def _healthcheck(max_age_hours: float = 192.0) -> int:
-    """Watchdog (daily cron): alert + nonzero exit if the weekly clock has gone quiet."""
+    """Watchdog (daily cron): alert + nonzero exit if the weekly clock has gone quiet.
+
+    Reports WHICH of the three stale conditions fired, because they have different remedies:
+    a run that CRASHED (fix the crash) is not a run that never HAPPENED (fix the scheduler).
+    Always includes the recorded error, which the heartbeat already captured — an alert that
+    withholds the diagnosis it is holding just costs a triage round-trip."""
     hb = notify.read_heartbeat()
-    if notify.heartbeat_stale(hb, max_age_hours):
-        detail = (f"Last recorded run: {hb.as_of} (status: {hb.status}, at {hb.ts})."
-                  if hb else "No successful run has ever been recorded on this host.")
-        notify.notify("⚠️ Tedium Premium forward: STALE",
-                      f"The weekly screen has not completed successfully in over "
-                      f"{max_age_hours / 24:.0f} days — the clock may have gone quiet. {detail} "
-                      f"Check the container: docker logs tediumpremium-app.")
-        return 1
-    log.info("healthcheck OK: %s", hb)
-    return 0
+    if not notify.heartbeat_stale(hb, max_age_hours):
+        log.info("healthcheck OK: %s", hb)
+        return 0
+
+    age_h = notify.heartbeat_age_hours(hb)
+    ago = f"{age_h / 24:.1f} days ago" if age_h is not None else "at an unreadable timestamp"
+    if hb is None:
+        subject = "⚠️ Tedium Premium forward: NO RUNS RECORDED"
+        body = (f"No run has ever been recorded on this host, so the weekly screen may never "
+                f"have fired at all. Check the stack is up and the schedule is loaded: "
+                f"docker compose ps. {_LOG_HINT}")
+    elif hb.status != "ok":
+        subject = "⚠️ Tedium Premium forward: LAST RUN CRASHED"
+        body = (f"The weekly screen RAN and CRASHED — this is a failed run, not a missing one, "
+                f"so the clock itself is fine. It last ran for {hb.as_of} ({ago}, at {hb.ts}) "
+                f"and recorded this error:\n\n    {hb.note or '(no error detail recorded)'}\n\n"
+                f"No book was emitted and no orders were placed that week. This alert repeats "
+                f"daily until a run completes successfully — the next one is scheduled for "
+                f"Monday 10:00 ET. To reproduce now, for free (no orders, no LLM spend): "
+                f"docker compose run --rm app python -m deepvalue.forward.run --execute ibkr\n\n"
+                f"{_LOG_HINT}")
+    else:
+        subject = "⚠️ Tedium Premium forward: CLOCK QUIET"
+        body = (f"The weekly screen last SUCCEEDED {ago} (for {hb.as_of}, at {hb.ts}) and has "
+                f"not run since, which exceeds the {max_age_hours / 24:.0f}-day limit. Nothing "
+                f"crashed — the run simply never started, so suspect the scheduler or the "
+                f"container rather than the screen. Check it is up: docker compose ps. "
+                f"{_LOG_HINT}")
+    notify.notify(subject, body)
+    return 1
 
 
 def main() -> None:

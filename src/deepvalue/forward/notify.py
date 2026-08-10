@@ -131,12 +131,23 @@ def read_heartbeat(path: Path = DEFAULT_HEARTBEAT_PATH) -> Heartbeat | None:
         return None
 
 
+def heartbeat_age_hours(hb: Heartbeat | None) -> float | None:
+    """Hours since the heartbeat was written; None if absent or the timestamp is unreadable.
+    Split out of `heartbeat_stale` so an alert can REPORT the age it tripped on — a watchdog
+    that asserts an age without measuring it sends the reader chasing the wrong failure."""
+    if hb is None:
+        return None
+    try:
+        return (datetime.now(UTC) - datetime.fromisoformat(hb.ts)).total_seconds() / 3600
+    except ValueError:
+        return None
+
+
 def heartbeat_stale(hb: Heartbeat | None, max_age_hours: float) -> bool:
-    """True if no heartbeat, the last run errored, or it's older than allowed (clock quiet)."""
+    """True if no heartbeat, the last run errored, or it's older than allowed (clock quiet).
+    NOTE these are three distinct conditions with three distinct remedies — callers that alert
+    on this must say WHICH one fired (see `forward.run._healthcheck`)."""
     if hb is None or hb.status != "ok":
         return True
-    try:
-        age = datetime.now(UTC) - datetime.fromisoformat(hb.ts)
-    except ValueError:
-        return True
-    return age.total_seconds() > max_age_hours * 3600
+    age = heartbeat_age_hours(hb)
+    return age is None or age > max_age_hours

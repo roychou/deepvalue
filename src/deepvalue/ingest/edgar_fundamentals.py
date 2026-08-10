@@ -14,8 +14,10 @@ period_of_report). Source for the LIVE forward path; the backtest keeps using it
 from __future__ import annotations
 
 import functools
+import logging
 
 from deepvalue.ingest.edgar import (
+    EdgarNotFound,
     _annual_flow,
     _best_revenue_rows,
     _concept_rows,
@@ -24,6 +26,8 @@ from deepvalue.ingest.edgar import (
     fetch_company_facts,
 )
 from deepvalue.ingest.fundamentals_store import Period
+
+logger = logging.getLogger(__name__)
 
 # FMP field -> US-GAAP concept(s), priority-ordered (first present wins). Micro-cap XBRL
 # tagging is inconsistent, hence the fallbacks.
@@ -70,7 +74,18 @@ _SHARES: dict[str, list[str]] = {
 
 
 def _gaap(ticker: str) -> tuple[dict, str | None]:
-    facts = fetch_company_facts(ticker)
+    """US-GAAP facts for `ticker`, or ({}, None) if EDGAR holds no XBRL for it at all.
+
+    A 404 on companyfacts is not an error — plenty of live 10-K/10-Q filers have never filed
+    XBRL, and SEC serves them `NoSuchKey` rather than an empty blob. That is the SAME fact as
+    a filer whose facts carry no us-gaap section, which `load_periods` already handles by
+    returning [], so it is normalized to the same shape here. Any OTHER EdgarError (403/429/
+    5xx) still propagates: that is EDGAR failing, not the company, and must not be silent."""
+    try:
+        facts = fetch_company_facts(ticker)
+    except EdgarNotFound:
+        logger.info("no XBRL companyfacts for %s — not screenable, skipping", ticker)
+        return {}, None
     cik = facts.get("cik")
     return facts.get("facts", {}).get("us-gaap", {}), (str(cik) if cik is not None else None)
 

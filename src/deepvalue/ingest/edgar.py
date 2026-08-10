@@ -69,6 +69,14 @@ class EdgarError(RuntimeError):
     """Raised when EDGAR returns an error or unexpected shape."""
 
 
+class EdgarNotFound(EdgarError):
+    """EDGAR has no such resource (HTTP 404). Distinct from EdgarError because the two need
+    OPPOSITE handling: a 404 on companyfacts is a normal fact about ONE filer (it has never
+    filed XBRL), so the caller should skip that name — whereas a 403/429/5xx is a fact about
+    EDGAR (blocked, throttled, down) and must stay loud, or a whole run silently screens
+    nothing and reports a quiet week."""
+
+
 def _user_agent() -> str:
     ua = os.environ.get("EDGAR_USER_AGENT")
     if not ua:
@@ -99,6 +107,8 @@ def _get(url: str) -> Any:
         resp = httpx.get(url, headers={"User-Agent": _user_agent()}, timeout=TIMEOUT_SECONDS)
     except httpx.RequestError as e:
         raise EdgarError(f"EDGAR request failed: {e}") from e
+    if resp.status_code == 404:
+        raise EdgarNotFound(f"EDGAR has no resource at {url}")
     if resp.status_code != 200:
         raise EdgarError(f"EDGAR returned {resp.status_code} for {url}: {resp.text[:200]}")
     return resp.json()
@@ -357,6 +367,8 @@ def _get_text(url: str) -> str:
         resp = httpx.get(url, headers={"User-Agent": _user_agent()}, timeout=TIMEOUT_SECONDS)
     except httpx.RequestError as e:
         raise EdgarError(f"EDGAR request failed: {e}") from e
+    if resp.status_code == 404:
+        raise EdgarNotFound(f"EDGAR has no resource at {url}")
     if resp.status_code != 200:
         raise EdgarError(f"EDGAR returned {resp.status_code} for {url}: {resp.text[:200]}")
     return resp.text

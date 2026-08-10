@@ -44,9 +44,8 @@ async def _run() -> int:
 
     # forward prices from IBKR — lookback must reach the OLDEST book through today
     lookback = min(1000, (date.today() - date.fromisoformat(as_ofs[0])).days + 30)
-    ib = await ibkr_prices.connect()
+    ib, _ = await ibkr_prices.connect_ready()
     try:
-        ibkr_prices.assert_paper_ready(ib)
         prices = await ibkr_prices.fetch_prices_for(ib, tickers, lookback_days=max(lookback, 60))
     finally:
         ib.disconnect()

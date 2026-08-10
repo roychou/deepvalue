@@ -38,7 +38,20 @@ LISTED = {"NASDAQ", "NYSE", "AMEX", "ARCA", "BATS", "ISLAND", "NYSENAT"}
 
 
 class GatewayNotReadyError(RuntimeError):
-    """Reachable Gateway that isn't in a usable paper-trading state."""
+    """Reachable Gateway that isn't in a usable paper-trading state. Transient — IBC may still
+    be logging the session in."""
+
+
+class LiveAccountError(GatewayNotReadyError):
+    """The Gateway is logged into a LIVE account. A hard stop: never retried, never waited out
+    (the strategy is paper-only, and retrying a live session is the one way to make it worse)."""
+
+
+# A re-authenticating Gateway is up but account-less for a few minutes. Wait that out rather
+# than lose the week: compose's `depends_on: service_healthy` gate only runs at container
+# START, so it does nothing for a session that logs itself out days later.
+READY_ATTEMPTS = int(os.getenv("IBKR_READY_ATTEMPTS", "10"))
+READY_DELAY_S = float(os.getenv("IBKR_READY_DELAY_S", "30"))
 
 
 async def connect(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT,
@@ -50,6 +63,41 @@ async def connect(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT,
     return ib
 
 
+async def connect_ready(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT,
+                        client_id: int = DEFAULT_CLIENT_ID,
+                        attempts: int = READY_ATTEMPTS,
+                        delay: float = READY_DELAY_S) -> tuple[IB, str]:
+    """Connect AND confirm a live paper session, retrying a refused connection or a logged-out
+    Gateway across the IBC re-login window. Returns (ib, paper_account); caller disconnects.
+
+    IB forces the Gateway to re-authenticate periodically and IBC restarts it; during that
+    window the container is healthy but the API reports no managed account. Failing hard there
+    costs the entire week's run, so wait — but keep it BOUNDED and keep a live account a hard
+    stop, so a genuinely broken Gateway still fails loudly with an actionable message."""
+    last: Exception | None = None
+    for i in range(1, attempts + 1):
+        ib = IB()
+        try:
+            await ib.connectAsync(host, port, clientId=client_id)
+            acct = assert_paper_ready(ib)
+            if i > 1:
+                logger.info("gateway became ready on attempt %d/%d", i, attempts)
+            return ib, acct
+        except LiveAccountError:
+            ib.disconnect()
+            raise
+        except Exception as e:  # noqa: BLE001 — refused/timed-out/logged-out are all retryable
+            last = e
+            ib.disconnect()
+        if i < attempts:
+            logger.warning("gateway not ready (%s: %s) — attempt %d/%d, retrying in %.0fs",
+                           type(last).__name__, last, i, attempts, delay)
+            await asyncio.sleep(delay)
+    raise GatewayNotReadyError(
+        f"gateway at {host}:{port} never became paper-ready: {attempts} attempts over "
+        f"{attempts * delay / 60:.0f} min, last failure {type(last).__name__}: {last}")
+
+
 def assert_paper_ready(ib: IB) -> str:
     """Preflight: confirm a PAPER account is connected, so we fail fast (before any LLM
     spend) if the Gateway is logged out, half-initialized, or — critically — live."""
@@ -59,8 +107,8 @@ def assert_paper_ready(ib: IB) -> str:
                                    "(still logging in, or IBC session not ready)")
     for a in accts:
         if not a.startswith(PAPER_ACCT_PREFIX):
-            raise GatewayNotReadyError(f"refusing to run: account {a!r} is not paper "
-                                       f"(paper ids start {PAPER_ACCT_PREFIX!r})")
+            raise LiveAccountError(f"refusing to run: account {a!r} is not paper "
+                                   f"(paper ids start {PAPER_ACCT_PREFIX!r})")
     logger.info("preflight OK: paper account %s ready", accts[0])
     return accts[0]
 
