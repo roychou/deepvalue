@@ -1,9 +1,11 @@
 # Tedium Premium forward-clock deployment (replaces parley on the same box).
 #
-#   gateway : hand-rolled IB Gateway + IBC (paper), headless. Holds the broker session.
-#             (Generic image copied from parley — same DU paper account, reused + reset.)
+#   gateway : NOT defined here any more (since 21 Sep 2026). The IB Gateway + IBC container is owned by the
+#             shared `marketdata` stack (~/Development/roy/marketdata, /root/marketdata on the VPS), which
+#             serves several clients from one broker session. Defining it here as well would start a
+#             SECOND gateway fighting over the same IBKR login. deploy/gateway/ is kept for reference.
 #   app     : the Tedium Premium scheduler (supercronic) — weekly forward session + daily
-#             watchdog. Connects to `gateway` over the private compose network.
+#             watchdog. Connects to `gateway` over the external private network `ibkr`.
 #
 # Private network only: the Gateway API is never published to the host/internet (`expose`,
 # not `ports:`). Secrets come from deploy/.env (gitignored) -> Doppler at runtime. State
@@ -13,27 +15,12 @@
 #   cp .env.example .env && $EDITOR .env        # the Doppler service token (reuse parley's)
 #   docker compose build
 #   docker compose up -d
-#   docker compose logs -f gateway              # watch the IBC login succeed
+#   (gateway logs: cd /root/marketdata/deploy && docker compose logs -f gateway)
 #   # preview a session by hand:
 #   docker compose run --rm app python -m deepvalue.forward.run --execute ibkr
 name: tediumpremium
 
 services:
-  gateway:
-    build:
-      context: ./gateway
-    image: tediumpremium-gateway:local
-    environment:
-      DOPPLER_TOKEN: ${DOPPLER_TOKEN:?set DOPPLER_TOKEN in deploy/.env}
-      TRADING_MODE: paper          # the image refuses anything but paper
-      API_PORT_RELAY: "4004"
-      TZ: ${TZ:-America/New_York}
-    expose:
-      - "4004"                     # internal network only — never add a host `ports:` map
-    volumes:
-      - gateway_settings:/root/Jts # persist jts.ini (API + auto-restart) & IBC state
-    restart: unless-stopped
-
   app:
     build:
       context: ..                  # repo root: needs src/ + config/ + pyproject.toml + uv.lock
@@ -47,12 +34,13 @@ services:
     volumes:
       - forward:/app/data/forward  # the live forward track record — back this volume up
       - cache:/app/data/cache      # self-warming EDGAR / price caches
-    depends_on:
-      gateway:
-        condition: service_healthy # wait for Gateway to be logged in + API live
+    networks: [default, ibkr]      # `gateway` resolves on ibkr; the app's own connect_ready() retries until it is logged in
     restart: unless-stopped
 
+networks:
+  ibkr:
+    external: true               # owned by the marketdata stack (/root/marketdata/deploy)
+
 volumes:
-  gateway_settings:
   forward:
   cache:
